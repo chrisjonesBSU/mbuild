@@ -7,7 +7,7 @@ from mbuild.utils.validation import assert_port_exists
 from mbuild import clone
 
 __all__ = ['Pattern', 'DiskPattern', 'SpherePattern', 'Random2DPattern',
-           'Random3DPattern', 'Grid2DPattern', 'Grid3DPattern']
+           'Random3DPattern', 'Grid2DPattern', 'Grid3DPattern', 'CustomPattern']
 
 
 class Pattern(object):
@@ -184,7 +184,6 @@ class Random2DPattern(Pattern):
             Seed for random number generation
 
         """
-
         if seed:
             np.random.seed(seed)
         points = np.random.random((n, 3))
@@ -192,6 +191,16 @@ class Random2DPattern(Pattern):
         super(Random2DPattern, self).__init__(points=points, **kwargs)
 
 
+class CustomPattern(Pattern):
+    """ Generate a pattern from a numpy array
+   
+    """
+
+    def __init__(self, custom_points_array, **kwargs):
+        points = custom_points_array
+        super(CustomPattern, self).__init__(points=points, **kwargs)
+
+    
 class Random3DPattern(Pattern):
     """ Generate n random points on a 3D grid
 
@@ -228,7 +237,6 @@ class Grid2DPattern(Pattern):
         """
 
     def __init__(self, n, m, **kwargs):
-
         points = np.zeros(shape=(n*m, 3), dtype=float)
         for i, j in product(range(n), range(m)):
             points[i*m + j, 0] = i / n
