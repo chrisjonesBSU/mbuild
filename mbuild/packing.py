@@ -344,7 +344,8 @@ def fill_region(compound, n_compounds, region, overlap=0.2,
 
     # In angstroms for packmol.
     overlap *= 10
-
+    print('EDGE:')
+    print(edge)
     # Build the input file and call packmol.
     filled_xyz = _new_xyz_file()
 
@@ -353,12 +354,12 @@ def fill_region(compound, n_compounds, region, overlap=0.2,
     try:
         input_text = PACKMOL_HEADER.format(overlap, filled_xyz.name, seed)
 
-        for comp, m_compounds, reg, rotate in zip(compound, n_compounds, region, fix_orientation):
+        for comp, m_compounds, reg, rotate, edge in zip(compound, n_compounds, region, fix_orientation, edge):
             m_compounds = int(m_compounds)
 
             compound_xyz = _new_xyz_file()
             compound_xyz_list.append(compound_xyz)
-
+            print(edge)
             comp.save(compound_xyz.name, overwrite=True)
             PACKMOL_CONSTRAIN = packmol_constrain(rotate)
             reg_mins = reg.mins * 10
