@@ -20,7 +20,8 @@ tolerance {0:.16f}
 filetype xyz
 output {1}
 seed {2}
-
+maxit 25
+movebadrandom
 """
 PACKMOL_SOLUTE = """
 structure {0}
@@ -34,6 +35,7 @@ structure {0}
     number {1:d}
     inside box {2:.3f} {3:.3f} {4:.3f} {5:.3f} {6:.3f} {7:.3f}
     {8}
+    movefrac 0.005
 end structure
 """
 PACKMOL_SPHERE = """
