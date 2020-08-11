@@ -35,7 +35,7 @@ structure {0}
     number {1:d}
     inside box {2:.3f} {3:.3f} {4:.3f} {5:.3f} {6:.3f} {7:.3f}
     {8}
-    movefrac 0.005
+    movefrac 0.01
 end structure
 """
 PACKMOL_SPHERE = """
