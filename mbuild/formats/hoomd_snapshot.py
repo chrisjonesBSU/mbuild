@@ -83,7 +83,8 @@ def to_hoomdsnapshot(structure,  ref_distance=1.0, ref_mass=1.0,
 
     # Get box information
     if np.allclose(structure.box[3:6], np.array([90, 90, 90])):
-        lx,ly,lz = structure.box[:3]/ref_distance
+        #lx,ly,lz = structure.box[:3]/ref_distance
+        lx, ly, lz = structure.box[:3]
         xy,xz,yz = 0,0,0
     else:
         a, b, c = structure.box[0:3] / ref_distance
