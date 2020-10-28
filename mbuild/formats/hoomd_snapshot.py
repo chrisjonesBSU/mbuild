@@ -54,13 +54,18 @@ def to_hoomdsnapshot(structure,  ref_distance=1.0, ref_mass=1.0,
     Force field parameters are not written to the hoomd_snapshot 
 
     """
+    print("SHIFT COORDS = {}".format(shift_coords))
     if not isinstance(structure, (mb.Compound, pmd.Structure)):
         raise ValueError("You are trying to create a hoomd.Snapshot from " +
                 "{} ".format(type(structure)) + 
                 "please pass mb.Compound or pmd.Structure")
     elif isinstance(structure, mb.Compound):
         structure = structure.to_parmed(**parmed_kwargs)
-
+    print('------------------')
+    print('Parmed Structure Info:')
+    print('Box before scaling by ref distance')
+    print(structure.box)
+    print('-------------------')
 
     if not hoomd.context.current:
         hoomd.context.initialize("")
@@ -72,19 +77,36 @@ def to_hoomdsnapshot(structure,  ref_distance=1.0, ref_mass=1.0,
                                 atom.sigma) for atom in structure.atoms))
         ref_energy = max(pair_coeffs, key=operator.itemgetter(1))[1]
         ref_distance = max(pair_coeffs, key=operator.itemgetter(2))[2]
-
+    print('------------------')
+    print('REFERENCE VALUES:')
+    print('Mass = {}'.format(ref_mass))
+    print('Distance = {}'.format(ref_distance))
+    print('Energy = {}'.format(ref_energy))
+    print('--------------------------------')
     ReferenceValues = namedtuple("ref_values", ["distance", "mass", "energy"])
     ref_values = ReferenceValues(ref_distance, ref_mass, ref_energy)
 
-    xyz = np.array([[atom.xx, atom.xy, atom.xz] for atom in structure.atoms])
+    xyz_init = np.array([[atom.xx, atom.xy, atom.xz] for atom in structure.atoms])
+    xyz_init_save = np.copy(xyz_init)
     if shift_coords:
-        xyz = coord_shift(xyz, structure.box[:3])
-
+        xyz = coord_shift(xyz_init, structure.box[:3])
+        xyz *= 0.98
+    else:
+        xyz = xyz_init
+    #print('------------------------------')
+    #for init, after in zip(xyz_init_save, xyz):
+    #    print(init, after)
+    #print('------------------------------')
 
     # Get box information
+    print('---------------')
+    print('Setting box information for snapshot')
     if np.allclose(structure.box[3:6], np.array([90, 90, 90])):
+        print('reference distance = {}'.format(ref_distance))
         lx,ly,lz = structure.box[:3]/ref_distance
         xy,xz,yz = 0,0,0
+        print('Snapshot Box Edge Lengths (Scaled by ref distance)')
+        print(lx, ly, lz)
     else:
         a, b, c = structure.box[0:3] / ref_distance
         alpha, beta, gamma = np.radians(structure.box[3:6])
@@ -97,12 +119,18 @@ def to_hoomdsnapshot(structure,  ref_distance=1.0, ref_mass=1.0,
         lz = np.sqrt(c**2 - xz**2 - yz**2)
 
     n_particles, scaled_positions, unique_types, typeids, scaled_mass, scaled_charges, rigid_bodies = _parse_particle_information(structure, xyz, ref_distance, ref_mass, ref_energy, rigid_bodies)
+    print('parse particle information complete')
     n_bonds, unique_bond_types, bond_typeids, bond_groups = _parse_bond_information(structure)
+    print('parse bond information complete')
     n_angles, unique_angle_types, angle_typeids, angle_groups = _parse_angle_information(structure)
+    print('parse angle information complete')
     n_dihedrals, unique_dihedral_types, dihedral_typeids, dihedral_groups = _parse_dihedral_information(structure)
+    print('parse dihedral information complete')
     n_impropers, unique_improper_types, improper_typeids, improper_groups = _parse_improper_information(structure)
+    print('parse imporoper information complete')
     pair_types, pair_typeid, pairs, n_pairs = _parse_pair_information(structure)
-
+    print('parse pair information complete')
+    print('CREATING SNAPSHOT')
     hoomd_snapshot = hoomd.data.make_snapshot(N=n_particles,
             box=hoomd.data.boxdim(Lx=lx, Ly=ly, Lz=lz, xy=xy, xz=xz, yz=yz),
             particle_types=unique_types, bond_types=unique_bond_types,
@@ -237,6 +265,7 @@ def _parse_bond_information(structure):
     return n_bonds, unique_bond_types, bond_typeids, bond_groups
 
 def _parse_angle_information(structure):
+    print('STARTING TO PARSE ANGLE INFORMATION')
     n_angles = len(structure.angles)
 
     unique_angle_types = set()
@@ -261,7 +290,6 @@ def _parse_angle_information(structure):
 
 def _parse_dihedral_information(structure):
     n_dihedrals = len(structure.rb_torsions + structure.dihedrals)
-
     unique_dihedral_types = set()
     for dihedral in structure.rb_torsions+structure.dihedrals:
         t1, t2 = dihedral.atom1.type, dihedral.atom2.type
@@ -272,7 +300,6 @@ def _parse_dihedral_information(structure):
             dihedral_type = ('-'.join((t4, t3, t2, t1)))
         unique_dihedral_types.add(dihedral_type)
     unique_dihedral_types = sorted(list(unique_dihedral_types), key=natural_sort)
-
     dihedral_typeids = []
     dihedral_groups = []
     for dihedral in structure.rb_torsions+structure.dihedrals:
@@ -285,7 +312,6 @@ def _parse_dihedral_information(structure):
         dihedral_typeids.append(unique_dihedral_types.index(dihedral_type))
         dihedral_groups.append((dihedral.atom1.idx, dihedral.atom2.idx,
                                 dihedral.atom3.idx, dihedral.atom4.idx))
-
 
     return n_dihedrals, unique_dihedral_types, dihedral_typeids, dihedral_groups
 

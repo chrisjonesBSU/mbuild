@@ -70,7 +70,6 @@ def create_hoomd_simulation(structure, ref_distance=1.0, ref_mass=1.0,
         angstroms, kcal/mol, and daltons
 
     """
-
     if isinstance(structure, mb.Compound):
         raise ValueError("You passed mb.Compound to create_hoomd_simulation, " +
                 "there will be no angles, dihedrals, or force field parameters. " +
@@ -106,11 +105,18 @@ def create_hoomd_simulation(structure, ref_distance=1.0, ref_mass=1.0,
 
     if not hoomd.context.current:
         hoomd.context.initialize("")
+    print('## CREATING SNAPSHOT OF SYSTEM ##')
     snapshot,_ = to_hoomdsnapshot(structure, ref_distance=ref_distance,
             ref_mass=ref_mass, ref_energy=ref_energy, **snapshot_kwargs)
+    
     hoomd_objects.append(snapshot)
-    hoomd.init.read_snapshot(snapshot)
-
+    try:
+        hoomd.init.read_snapshot(snapshot)
+    except Exception as e:
+        print('ERROR')
+        print(e)
+        return hoomd_objects, ref_values, snapshot
+    print('NO ERRORS')
     nl = hoomd.md.nlist.cell()
     nl.reset_exclusions(exclusions=['1-2', '1-3'])
     hoomd_objects.append(nl)
@@ -150,7 +156,7 @@ def create_hoomd_simulation(structure, ref_distance=1.0, ref_mass=1.0,
         hoomd_objects.append(rb_torsions)
     print("HOOMD SimulationContext updated from ParmEd Structure")
 
-    return hoomd_objects, ref_values
+    return hoomd_objects, ref_values, snapshot
 
 def _init_hoomd_lj(structure, nl, r_cut=1.2,
         ref_distance=1.0, ref_energy=1.0):
