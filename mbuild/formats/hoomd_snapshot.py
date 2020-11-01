@@ -79,7 +79,7 @@ def to_hoomdsnapshot(structure,  ref_distance=1.0, ref_mass=1.0,
     xyz = np.array([[atom.xx, atom.xy, atom.xz] for atom in structure.atoms])
     if shift_coords:
         xyz = coord_shift(xyz, structure.box[:3])
-
+        xyz *= 0.98
 
     # Get box information
     if np.allclose(structure.box[3:6], np.array([90, 90, 90])):
