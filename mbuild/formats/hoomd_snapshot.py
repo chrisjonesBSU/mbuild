@@ -89,7 +89,9 @@ def to_hoomdsnapshot(structure,  ref_distance=1.0, ref_mass=1.0,
     xyz_init = np.array([[atom.xx, atom.xy, atom.xz] for atom in structure.atoms])
     xyz_init_save = np.copy(xyz_init)
     if shift_coords:
+        print('shifting coords')
         xyz = coord_shift(xyz_init, structure.box[:3])
+        print('slightly descaling coord positions')
         xyz *= 0.98
     else:
         xyz = xyz_init
