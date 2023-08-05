@@ -246,7 +246,7 @@ def load_smiles(
     """
     # Initialize an mb.Compound if none is provided
     if not compound:
-        compound = mb.Compound()
+        compound = mb.Compound(**kwargs)
 
     test_path = Path(smiles_or_filename)
 
