@@ -4,17 +4,34 @@ from mbuild.compound import Compound
 
 
 class Graphene(Compound):
-    def __init__(self, x_repeat, y_repeat, n_layers, periodic=True):
-        if periodic:
-            periodicity = (True, True, False)
-        else:
-            periodicity = (False, False, False)
+    """Creates a rectangular graphene layer or multiple layers.
+    
+    Parameters
+    ----------
+    x_repeat : int, required
+        Number of times to repeat graphene lattice in the x-direciton
+    y_repeat: int, required
+        Number of times to repeat graphene lattice in the y-direciton
+    n_layers: int, optional, default 1
+        Number of times to repeat the complete layer in the normal direction
+    periodicity : tuple of bools, length=3, optional, default=None
+        Whether the Compound is periodic in the x, y, and z directions.
+        If None is provided, the periodicity is set to (False, False, False)
+        which is non-periodic in all directions.
+
+    Notes
+    -----
+    To create bonds along periodic boundaries of the layers in the x and y
+    directions, set periodicity to (True, True, False)
+
+    """
+    def __init__(self, x_repeat, y_repeat, n_layers, periodicity=None):
         super(Graphene, self).__init__(periodicity=periodicity)
         spacings = [0.425, 0.246, 0.35]
         points = [[1/6, 0, 0], [1/2, 0, 0], [0, 0.5, 0], [2/3, 1/2, 0]]
         lattice = Lattice(
                 lattice_spacing=spacings,
-                angles=[90,90,90],
+                angles=[90, 90, 90],
                 lattice_points={"A": points}
         )
         carbon = mb.Compound(name="C")
