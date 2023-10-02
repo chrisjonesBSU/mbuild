@@ -1,5 +1,6 @@
 import mbuild as mb
 from mbuild.lattice import Lattice
+from mbuild.compound import Compound
 
 
 class Graphene(Compound):
@@ -11,8 +12,8 @@ class Graphene(Compound):
         super(Graphene, self).__init__(periodicity=periodicity)
         spacings = [0.425, 0.246, 0.35]
         points = [[1/6, 0, 0], [1/2, 0, 0], [0, 0.5, 0], [2/3, 1/2, 0]]
-        lattice = mb.Lattice
-                spacings=spacings,
+        lattice = Lattice(
+                lattice_spacing=spacings,
                 angles=[90,90,90],
                 lattice_points={"A": points}
         )
