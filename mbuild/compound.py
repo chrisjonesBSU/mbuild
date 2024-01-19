@@ -458,6 +458,14 @@ class Compound(object):
         if parent is None:
             return self
         return parent
+    
+    def particles_by_indices(self, indices):
+        """"""
+        if isinstance(indices, int):
+            indices = [indices]
+        for i, particle in enumerate(self.particles()):
+            if i in indices:
+                yield particle
 
     def particles_by_name(self, name):
         """Return all Particles of the Compound with a specific name.
@@ -1535,6 +1543,17 @@ class Compound(object):
                     "simulation box."
                 )
         self._box = box
+
+    @property
+    def index(self):
+        if list(self.particles()) != [self]:
+            raise MBuildError(
+                "A particle index can only be returned for  "
+                "compounds at the bottom of their hierarchy."
+            )
+        for i, p in enumerate(self.parent.particles()):
+            if p == self:
+                return i
 
     @property
     def element(self):
