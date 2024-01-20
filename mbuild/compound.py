@@ -1545,7 +1545,7 @@ class Compound(object):
         self._box = box
 
     @property
-    def index(self):
+    def particle_index(self):
         if list(self.particles()) != [self]:
             raise MBuildError(
                 "A particle's index can only be returned for  "
