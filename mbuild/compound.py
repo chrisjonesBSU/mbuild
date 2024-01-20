@@ -1548,7 +1548,7 @@ class Compound(object):
     def index(self):
         if list(self.particles()) != [self]:
             raise MBuildError(
-                "A particle index can only be returned for  "
+                "A particle's index can only be returned for  "
                 "compounds at the bottom of their hierarchy."
             )
         for i, p in enumerate(self.parent.particles()):
