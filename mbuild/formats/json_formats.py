@@ -219,12 +219,7 @@ def _dict_to_mb(compound_dict):
 
 
 def _dict_successors(compound_dict):
-    """Get all successors of a compound and its subcompounds recursively.
-
-    Notes
-    -----
-    This implementation borrows concepts from protobuf.py's _proto_successors()
-    """
+    """Get all successors of a compound and its subcompounds recursively."""
     if not compound_dict.get("children", False):
         return
     else:

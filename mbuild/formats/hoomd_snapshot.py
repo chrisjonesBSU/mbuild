@@ -50,21 +50,10 @@ def from_snapshot(snapshot, scale=1.0):
     bond_array = snapshot.bonds.group
     n_atoms = snapshot.particles.N
 
-    if "SnapshotSystemData_float" in dir(hoomd._hoomd) and isinstance(
-        snapshot, hoomd._hoomd.SnapshotSystemData_float
-    ):
-        # hoomd v2
-        box = snapshot.box
-        comp.box = Box.from_lengths_tilt_factors(
-            lengths=np.array([box.Lx, box.Ly, box.Lz]) * scale,
-            tilt_factors=np.array([box.xy, box.xz, box.yz]),
-        )
-    else:
-        # gsd / hoomd v3
-        box = np.asarray(snapshot.configuration.box)
-        comp.box = Box.from_lengths_tilt_factors(
-            lengths=box[:3] * scale, tilt_factors=box[3:]
-        )
+    box = np.asarray(snapshot.configuration.box)
+    comp.box = Box.from_lengths_tilt_factors(
+        lengths=box[:3] * scale, tilt_factors=box[3:]
+    )
 
     # GSD and HOOMD snapshots center their boxes on the origin (0,0,0)
     shift = np.array(comp.box.lengths) / 2
@@ -138,7 +127,8 @@ def to_hoomdsnapshot(
     -----
     This method does not create hoomd forcefield objects and
     the snapshot returned does not store the forcefield parameters.
-    See mbuild.formats.hoomd_forcefield.create_hoomd_forcefield()
+    See GMSO (https://github.com/mosdef-hub/gmso) for support
+    on creating Hoomd-Blue forces from a typed topology.
 
     About units: This method operates on a Parmed.Structure object
         where the units used differ from those used in mBuild and Foyer
@@ -180,8 +170,6 @@ def to_hoomdsnapshot(
         structure = structure.to_parmed(**parmed_kwargs)
 
     hoomd_version = _get_hoomd_version()
-    if hoomd_version.major == 2 and not hoomd.context.current:
-        hoomd.context.initialize("")
 
     if auto_scale:
         ref_mass = max([atom.mass for atom in structure.atoms])
@@ -295,17 +283,7 @@ def to_hoomdsnapshot(
                 "Initial snapshot provided, but it contains no particles"
             )
 
-        if hoomd_version.major == 2:
-            hoomd_snapshot.box = hoomd.data.boxdim(
-                Lx=lx, Ly=ly, Lz=lz, xy=xy, xz=xz, yz=yz
-            )
-
-            # save the box for later use when wrapping coordinates
-            box = hoomd_snapshot.box
-        elif hoomd_version.major == 3 or hoomd_version.major == 4:
-            hoomd_snapshot.configuration.box = [lx, ly, lz, xy, xz, yz]
-        else:
-            raise RuntimeError("Unsupported HOOMD version:", str(hoomd_version))
+        hoomd_snapshot.configuration.box = [lx, ly, lz, xy, xz, yz]
 
         init_bonds = hoomd_snapshot.bonds.N
         if init_bonds > 0:
@@ -344,44 +322,18 @@ def to_hoomdsnapshot(
         init_impropers = 0
         init_pairs = 0
 
-        if hoomd_version.major == 2:
-            hoomd_snapshot = hoomd.data.make_snapshot(
-                N=n_particles,
-                box=hoomd.data.boxdim(Lx=lx, Ly=ly, Lz=lz, xy=xy, xz=xz, yz=yz),
-                particle_types=unique_types,
-                bond_types=unique_bond_types,
-                angle_types=unique_angle_types,
-                dihedral_types=unique_dihedral_types,
-                improper_types=unique_improper_types,
-                pair_types=pair_types,
-            )
-            box = hoomd.data.boxdim(Lx=lx, Ly=ly, Lz=lz, xy=xy, xz=xz, yz=yz)
-        elif hoomd_version.major == 3 or hoomd_version.major == 4:
-            hoomd_snapshot = hoomd.Snapshot()
-            hoomd_snapshot.configuration.box = [lx, ly, lz, xy, xz, yz]
-            hoomd_snapshot.particles.types = unique_types
-            hoomd_snapshot.bonds.types = unique_bond_types
-            hoomd_snapshot.angles.types = unique_angle_types
-            hoomd_snapshot.dihedrals.types = unique_dihedral_types
-            hoomd_snapshot.impropers.types = unique_improper_types
-            hoomd_snapshot.pairs.types = pair_types
-            box = hoomd.Box(Lx=lx, Ly=ly, Lz=lz, xy=xy, xz=xz, yz=yz)
-        else:
-            raise RuntimeError("Unsupported HOOMD version:", str(hoomd_version))
-
-    # wrap particles into the box manually for v2
-    if hoomd_version.major == 2:
-        scaled_positions = np.stack(
-            [box.wrap(xyz)[0] for xyz in scaled_positions]
-        )
+        hoomd_snapshot = hoomd.Snapshot()
+        hoomd_snapshot.configuration.box = [lx, ly, lz, xy, xz, yz]
+        hoomd_snapshot.particles.types = unique_types
+        hoomd_snapshot.bonds.types = unique_bond_types
+        hoomd_snapshot.angles.types = unique_angle_types
+        hoomd_snapshot.dihedrals.types = unique_dihedral_types
+        hoomd_snapshot.impropers.types = unique_improper_types
+        hoomd_snapshot.pairs.types = pair_types
+        box = hoomd.Box(Lx=lx, Ly=ly, Lz=lz, xy=xy, xz=xz, yz=yz)
 
     def set_size(obj, n):
-        if hoomd_version.major == 2:
-            obj.resize(n)
-        elif hoomd_version.major == 3 or hoomd_version.major == 4:
-            obj.N = n
-        else:
-            raise RuntimeError("Unsupported HOOMD version:", str(hoomd_version))
+        obj.N = n
 
     set_size(hoomd_snapshot.particles, n_particles)
     hoomd_snapshot.particles.position[n_init:] = scaled_positions
@@ -391,8 +343,7 @@ def to_hoomdsnapshot(
     hoomd_snapshot.particles.body[n_init:] = rigid_bodies
 
     # wrap the particles into the box using the v3 API
-    if hoomd_version.major == 3 or hoomd_version.major == 4:
-        hoomd_snapshot.wrap()
+    hoomd_snapshot.wrap()
 
     if n_bonds > 0:
         set_size(hoomd_snapshot.bonds, n_bonds)
