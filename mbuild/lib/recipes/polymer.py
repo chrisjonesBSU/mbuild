@@ -88,6 +88,9 @@ class Polymer(Compound):
         super(Polymer, self).__init__()
         self._monomers = monomers or []
         self._end_groups = end_groups or [None, None]
+        self.sequence = None
+        self.n = None
+        self.mapping_dict = dict()
         if not isinstance(self._end_groups, list):
             raise ValueError(
                 "Please provide two end groups in a list; "
@@ -157,6 +160,8 @@ class Polymer(Compound):
             If ``None``, ``end_groups`` compound is None, and ``add_hydrogens`` is
             False then the head or tail port will be exposed in the polymer.
         """
+        self.sequence = sequence
+        self.n = n
         if n < 1:
             raise ValueError("n must be 1 or more")
 
@@ -211,7 +216,7 @@ class Polymer(Compound):
                     # Defaut to 1/2 H-C bond len
                     head_tail[i].update_separation(0.0547)
                     hydrogen["up"].update_separation(0.0547)
-                    self.add(hydrogen)
+                    head_tail[i].parent.add(hydrogen)
                     force_overlap(hydrogen, hydrogen["up"], head_tail[i])
                     head_tail[i] = None
                 else:
@@ -234,10 +239,28 @@ class Polymer(Compound):
             if id(port) not in port_ids:
                 self.remove(port)
 
+    def coarse_grain(self):
+        """Create a coarse-grained representation of the atomistic polymer."""
+        cg_polymer = Compound()
+        last_bead = None
+        for i, bead in enumerate(self.sequence * self.n):
+            aa_comp = self.children[i]
+            bead_comp = Compound(
+                    name=bead,
+                    mass=aa_comp.mass,
+                    pos=aa_comp.center
+            )
+            cg_polymer.add(bead_comp)
+            if last_bead:
+                cg_polymer.add_bond([bead_comp, last_bead])
+            last_bead = bead_comp
+        return cg_polymer
+
     def add_monomer(
         self,
         compound,
         indices,
+        label=None,
         separation=None,
         orientation=[None, None],
         replace=True,
@@ -303,6 +326,7 @@ class Polymer(Compound):
         """
         port_labels = ["up", "down"]
         comp = clone(compound)
+        self.mapping_dict[label] = compound
 
         for idx, label, orientation in zip(indices, port_labels, orientation):
             _add_port(comp, label, idx, separation, orientation, replace)
