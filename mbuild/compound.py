@@ -186,6 +186,8 @@ class Compound(object):
         self._rigid_id = None
         self._contains_rigid = False
         self._check_if_contains_rigid_bodies = False
+        self.reactive = False
+        self.reaction_type = None
 
         self.element = element
         if mass and float(mass) < 0.0:
@@ -806,6 +808,21 @@ class Compound(object):
             if self.rigid_id:
                 if self.rigid_id > missing_rigid_id:
                     self.rigid_id -= 1
+
+    def set_reactive(self, reaction_type):
+        """"""
+        if self._contains_only_ports():
+            self.reactive = True
+            self.reaction_type = reaction_type
+            for p in self.direct_bonds():
+                if p.element.atomic_number == 1:
+                    p.reactive = True
+                    p.reaction_type = reaction_type
+        else:
+            raise AttributeError(
+                "charge is immutable for Compounds that are "
+                "not at the bottom of the containment hierarchy."
+            )
 
     def add(
         self,
@@ -1917,6 +1934,7 @@ class Compound(object):
     def visualize(
         self,
         show_ports=False,
+        show_reactive_sites=False,
         backend="py3dmol",
         color_scheme={},
         bead_size=0.3,
@@ -1948,6 +1966,7 @@ class Compound(object):
             if backend.lower() in viz_pkg:
                 return viz_pkg[backend.lower()](
                     show_ports=show_ports,
+                    show_reactive_sites=show_reactive_sites,
                     color_scheme=color_scheme,
                     bead_size=bead_size,
                 )
@@ -1963,7 +1982,11 @@ class Compound(object):
             )
 
     def _visualize_py3dmol(
-        self, show_ports=False, color_scheme={}, bead_size=0.3
+        self,
+        show_ports=False,
+        show_reactive_sites=False,
+        color_scheme={},
+        bead_size=0.3,
     ):
         """Visualize the Compound using py3Dmol.
 
@@ -1988,6 +2011,10 @@ class Compound(object):
         py3Dmol = import_("py3Dmol")
 
         cloned = clone(self)
+        if show_reactive_sites:
+            for idx, p in enumerate(self.particles()):
+                if p.reactive:
+                    cloned[idx].name = None
 
         modified_color_scheme = {}
         for name, color in color_scheme.items():
