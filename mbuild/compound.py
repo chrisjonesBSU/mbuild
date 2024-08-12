@@ -2014,7 +2014,10 @@ class Compound(object):
         if show_reactive_sites:
             for idx, p in enumerate(self.particles()):
                 if p.reactive:
-                    cloned[idx].name = None
+                    if p.reaction_type == "polymer":
+                        cloned[idx].name = "_p" 
+                    else:
+                        cloned[idx].name = "_b" 
 
         modified_color_scheme = {}
         for name, color in color_scheme.items():
@@ -2023,6 +2026,9 @@ class Compound(object):
             new_name = name[0] + name[1:].lower()
             modified_color_scheme[new_name] = color
             modified_color_scheme[name] = color
+
+        modified_color_scheme["_p"] = "orange"
+        modified_color_scheme["_b"] = "green"
 
         for particle in cloned.particles():
             if not particle.name:
