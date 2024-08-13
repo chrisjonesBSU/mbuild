@@ -53,11 +53,11 @@ def clone(existing_compound, clone_of=None, root_container=None):
     )
     existing_compound._clone_bonds(clone_of=clone_of)
     # Set reactions
-    for idx, p in enumerate(existing_compound.particles()):
-        if p.reactive:
-            newone[idx].set_reactive(p.reaction_type)
-        else:
-            newone[idx]._reactive = False
+    #for idx, p in enumerate(existing_compound.particles()):
+    #    if p.reactive:
+    #        newone[idx].set_reactive(p.reaction_type)
+    #    else:
+    #        newone[idx]._reactive = False
     return newone
 
 
@@ -827,19 +827,29 @@ class Compound(object):
 
     def set_reactive(self, reaction_type):
         """"""
-        if self._contains_only_ports():
-            self._reactive = True
-            self.reaction_type = reaction_type
-            if self.direct_bonds():
-                for p in self.direct_bonds():
-                    if p.element.atomic_number == 1:
-                        p._reactive = True
-                        p.reaction_type = reaction_type
-        else:
+        from mbuild.port import Port
+
+        if not self._contains_only_ports():
             raise AttributeError(
-                "charge is immutable for Compounds that are "
+                "Reaction types are immutable for Compounds that are "
                 "not at the bottom of the containment hierarchy."
             )
+        self._reactive = True
+        self.reaction_type = reaction_type
+        h_bonds = [] 
+        for p in self.direct_bonds():
+            if p.element.atomic_number == 1:
+                p._reactive = True
+                p.reaction_type = reaction_type
+                h_bonds.append(p.xyz[0] - self.xyz[0])
+        # Make port
+        orientation = np.mean(h_bonds, axis=0)
+        port = Port(
+                anchor=self,
+                separation=0.10,
+                orientation=orientation
+        )
+        self.parent.add(port)
 
     def add(
         self,

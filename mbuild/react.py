@@ -76,10 +76,21 @@ class Reactant(Compound):
         if self._contains_only_ports():
             self.reactive = True
             self.reaction_type = reaction_type
+            h_bonds = []
             for p in self.direct_bonds():
                 if p.element.atomic_number == 1:
                     p.reactive = True
                     p.reaction_type = reaction_type
+                    h_bonds.append(p.xyz - self.xyz)
+            # Make port
+            print("adding port")
+            port = mb.port.Port(
+                    anchor=self,
+                    length=0.10,
+                    orientation=np.mean(h_bonds, axis=0)
+            )
+            self.add(port)
+
         else:
             raise AttributeError(
                 "Reaction types are immutable for Compounds that are "
