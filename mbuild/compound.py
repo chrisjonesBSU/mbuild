@@ -52,6 +52,12 @@ def clone(existing_compound, clone_of=None, root_container=None):
         clone_of=clone_of, root_container=root_container
     )
     existing_compound._clone_bonds(clone_of=clone_of)
+    # Set reactions
+    for idx, p in enumerate(existing_compound.particles()):
+        if p.reactive:
+            newone[idx].set_reactive(p.reaction_type)
+        else:
+            newone[idx]._reactive = False
     return newone
 
 
@@ -186,7 +192,7 @@ class Compound(object):
         self._rigid_id = None
         self._contains_rigid = False
         self._check_if_contains_rigid_bodies = False
-        self.reactive = False
+        self._reactive = False
         self.reaction_type = None
 
         self.element = element
@@ -549,6 +555,16 @@ class Compound(object):
         self._mass = value
 
     @property
+    def reactive(self):
+        """Check if a particle is set as a reactive site."""
+        if self._contains_only_ports() is False:
+            raise MBuildError(
+                "Cannot set the mass of a Compound containing "
+                "children compounds"
+            )
+        return self._reactive
+
+    @property
     def charge(self):
         """Return the total charge of a compound.
 
@@ -812,12 +828,13 @@ class Compound(object):
     def set_reactive(self, reaction_type):
         """"""
         if self._contains_only_ports():
-            self.reactive = True
+            self._reactive = True
             self.reaction_type = reaction_type
-            for p in self.direct_bonds():
-                if p.element.atomic_number == 1:
-                    p.reactive = True
-                    p.reaction_type = reaction_type
+            if self.direct_bonds():
+                for p in self.direct_bonds():
+                    if p.element.atomic_number == 1:
+                        p._reactive = True
+                        p.reaction_type = reaction_type
         else:
             raise AttributeError(
                 "charge is immutable for Compounds that are "
@@ -2015,9 +2032,9 @@ class Compound(object):
             for idx, p in enumerate(self.particles()):
                 if p.reactive:
                     if p.reaction_type == "polymer":
-                        cloned[idx].name = "_p" 
+                        cloned[idx].name = "_p"
                     else:
-                        cloned[idx].name = "_b" 
+                        cloned[idx].name = "_b"
 
         modified_color_scheme = {}
         for name, color in color_scheme.items():
@@ -3716,7 +3733,6 @@ class Compound(object):
                         )
                         # Referrers must have been handled already, or the will
                         # be handled
-
         return newone
 
     def _clone_bonds(self, clone_of=None):
