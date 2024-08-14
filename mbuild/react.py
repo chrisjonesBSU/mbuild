@@ -28,7 +28,7 @@ def load_reactant(string, name=None):
                 site_types.append("branch")
             skip_strings += 1
     # Get the actual SMILES string
-    smiles = s.replace(".", "")
+    smiles = string.replace(".", "")
     smiles = smiles.replace(",", "")
     mb_comp = mb.load(
         filename_or_object=smiles, smiles=True, compound=Reactant(name=name)
