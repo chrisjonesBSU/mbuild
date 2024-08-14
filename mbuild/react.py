@@ -2,13 +2,14 @@ import re
 
 import mbuild as mb
 from mbuild import Compound, Port
-#TODO: Make a simple library for testing
+
+# TODO: Make a simple library for testing
 # from mbuild.react.library import react_library
 
 
 def load_reactant(string, name=None):
     """Load a compound using SMILES with reaction notation.
-    
+
     Parameters
     ----------
     string : str, required
@@ -20,16 +21,16 @@ def load_reactant(string, name=None):
     skip_strings = 0
     for idx, s in enumerate(string):
         if not s.isalpha():
-            if s == ".":
+            if s == "*":
                 reactive_indices.append(idx - (1 + skip_strings))
                 site_types.append("polymer")
-            elif s == ",":
+            elif s == "^":
                 reactive_indices.append(idx - (1 + skip_strings))
                 site_types.append("branch")
             skip_strings += 1
     # Get the actual SMILES string
-    smiles = string.replace(".", "")
-    smiles = smiles.replace(",", "")
+    smiles = string.replace("*", "")
+    smiles = smiles.replace("^", "")
     mb_comp = mb.load(
         filename_or_object=smiles, smiles=True, compound=Reactant(name=name)
     )
@@ -40,17 +41,20 @@ def load_reactant(string, name=None):
 
 class Reactant(Compound):
     """"""
+
     def __init__(self, name):
         super(Reactant, self).__init__(name=name)
 
     def reaction_sites(self, reaction_type):
         """"""
-        #TODO: Make this a dict?
+        # TODO: Make this a dict?
         sites = []
+        sites dict()
         for p in self.particles():
             if p.element.atomic_number == 1:
                 continue
             if p.reactive and p.reaction_type == reaction_type:
+                sites[p] = dict("port":)
                 sites.append(
                     [p]
                     + [
@@ -58,8 +62,11 @@ class Reactant(Compound):
                         for i in p.direct_bonds()
                         if i.element.atomic_number == 1
                     ]
-                    + [port for port in self.available_ports()
-                       if port.anchor is p]
+                    + [
+                        port
+                        for port in self.available_ports()
+                        if port.anchor is p
+                    ]
                 )
         return sites
 
@@ -72,7 +79,7 @@ class Reactant(Compound):
             )
         self._reactive = True
         self.reaction_type = reaction_type
-        h_bonds = [] 
+        h_bonds = []
         for p in self.direct_bonds():
             if p.element.atomic_number == 1:
                 p._reactive = True
@@ -80,15 +87,11 @@ class Reactant(Compound):
                 h_bonds.append(p.xyz[0] - self.xyz[0])
         # Make port
         orientation = np.mean(h_bonds, axis=0)
-        port = Port(
-                anchor=self,
-                separation=0.10,
-                orientation=orientation
-        )
+        port = Port(anchor=self, separation=0.10, orientation=orientation)
         self.parent.add(port)
 
 
-class React(Compound):
+class Reaction(Compound):
     """"""
     def __init__(
         self,
@@ -98,7 +101,7 @@ class React(Compound):
         library=None,
         name=None,
     ):
-        super(React, self).__init__(name=name)
+        super(Reaction, self).__init__(name=name)
         self.name = name
         self.reactants = reactants
         self.sequence = sequence
@@ -133,9 +136,11 @@ class React(Compound):
         site2_anchor = site2_port.anchor
         # Remove hydrogens based on bond order
         for site in [site1_anchor, site2_anchor]:
-            hs = [p for p in site.direct_bonds() if p.element.atomic_number == 1]
+            hs = [
+                p for p in site.direct_bonds() if p.element.atomic_number == 1
+            ]
             if bond_order == 1:
-                site.parent.remove(hs[0]) 
+                site.parent.remove(hs[0])
             elif bond_order == 2:
                 site.parent.remove(hs[0])
                 site.parent.remove(hs[1])
