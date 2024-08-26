@@ -2,8 +2,7 @@ import re
 
 import mbuild as mb
 from mbuild import Compound, Port
-#TODO: Make a simple library for testing
-# from mbuild.react.library import react_library
+# from mbuild.library.react import react_library
 
 
 def load_reactant(string, name=None):
@@ -20,16 +19,16 @@ def load_reactant(string, name=None):
     skip_strings = 0
     for idx, s in enumerate(string):
         if not s.isalpha():
-            if s == ".":
+            if s == "*":
                 reactive_indices.append(idx - (1 + skip_strings))
                 site_types.append("polymer")
-            elif s == ",":
+            elif s == "^":
                 reactive_indices.append(idx - (1 + skip_strings))
                 site_types.append("branch")
             skip_strings += 1
     # Get the actual SMILES string
-    smiles = string.replace(".", "")
-    smiles = smiles.replace(",", "")
+    smiles = string.replace("*", "")
+    smiles = smiles.replace("^", "")
     mb_comp = mb.load(
         filename_or_object=smiles, smiles=True, compound=Reactant(name=name)
     )
@@ -69,10 +68,12 @@ class Reactant(Compound):
             raise AttributeError(
                 "Reaction types are immutable for Compounds that are "
                 "not at the bottom of the containment hierarchy."
+                "Setting reactive sites must be done at the particle level."
             )
         self._reactive = True
         self.reaction_type = reaction_type
         h_bonds = [] 
+        # Set all directly bonded hydrogens to reactive as well
         for p in self.direct_bonds():
             if p.element.atomic_number == 1:
                 p._reactive = True
