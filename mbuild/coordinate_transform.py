@@ -16,7 +16,9 @@ __all__ = [
 ]
 
 
-def force_overlap(move_this, from_positions, to_positions, add_bond=True):
+def force_overlap(
+    move_this, from_positions, to_positions, add_bond=True, reset_labels=False
+):
     """Move a Compound such that a position overlaps with another.
 
     Computes an affine transformation that maps the from_positions to the
@@ -33,6 +35,8 @@ def force_overlap(move_this, from_positions, to_positions, add_bond=True):
     add_bond : bool, optional, default=True
         If `from_positions` and `to_positions` are `Ports`, create a bond
         between the two anchor atoms.
+    reset_labels : bool, optional, default=False
+        If True, the Compound labels will be reset, renumbered using the Compound.reset_labels methods
     """
     from mbuild.port import Port
 
@@ -67,8 +71,12 @@ def force_overlap(move_this, from_positions, to_positions, add_bond=True):
                 to_positions.anchor.parent.add_bond(
                     (from_positions.anchor, to_positions.anchor)
                 )
-                from_positions.anchor.parent.remove(from_positions)
-                to_positions.anchor.parent.remove(to_positions)
+                from_positions.anchor.parent.remove(
+                    from_positions, reset_labels=reset_labels
+                )
+                to_positions.anchor.parent.remove(
+                    to_positions, reset_labels=reset_labels
+                )
 
 
 class CoordinateTransform(object):
@@ -321,8 +329,8 @@ def _create_equivalence_transform(equiv):
             isinstance(pair[0], Compound) and isinstance(pair[1], Compound)
         ):
             raise ValueError(
-                "Equivalence pair type mismatch: pair[0] is a {0} "
-                "and pair[1] is a {1}".format(type(pair[0]), type(pair[1]))
+                f"Equivalence pair type mismatch: pair[0] is a {pair[0]} "
+                f"and pair[1] is a {pair[1]}"
             )
 
         if not pair[0].children:
@@ -546,7 +554,7 @@ def x_axis_transform(
             "x_axis_transform, y_axis_transform, and z_axis_transform only "
             "accept mb.Compounds, list-like of size 3, or None for the "
             "point_on_x_axis parameter. User passed type: "
-            "{}.".format(type(point_on_x_axis))
+            f"{point_on_x_axis}."
         )
     if point_on_xy_plane is None:
         point_on_xy_plane = np.array([1.0, 1.0, 0.0])
@@ -559,7 +567,7 @@ def x_axis_transform(
             "x_axis_transform, y_axis_transform, and z_axis_transform only "
             "accept mb.Compounds, list-like of size 3, or None for the "
             "point_on_xy_plane parameter. User passed type: "
-            "{}.".format(type(point_on_xy_plane))
+            f"{point_on_xy_plane}."
         )
 
     atom_positions = compound.xyz_with_ports

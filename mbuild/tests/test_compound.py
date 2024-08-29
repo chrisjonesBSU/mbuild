@@ -915,9 +915,10 @@ class TestCompound(BaseTest):
         ethane6 = mb.clone(ethane)
         ethane6.flatten()
         hydrogens = ethane6.particles_by_name("H")
-        ethane6.remove(hydrogens, reset_labels=False)
-
+        ethane6.remove(hydrogens)
         assert list(ethane6.labels.keys()) == [
+            "methyl1",
+            "methyl2",
             "C",
             "C[0]",
             "H",
@@ -934,7 +935,7 @@ class TestCompound(BaseTest):
         ethane7 = mb.clone(ethane)
         ethane7.flatten()
         hydrogens = ethane7.particles_by_name("H")
-        ethane7.remove(hydrogens)
+        ethane7.remove(hydrogens, reset_labels=True)
 
         assert list(ethane7.labels.keys()) == [
             "C",
@@ -2483,7 +2484,10 @@ class TestCompound(BaseTest):
                 try:
                     assert my_cmp.get_smiles() == test_string
                 except AssertionError:
-                    assert my_cmp.get_smiles() == "CC(=O)OC1=C([CH][CH][CH][CH]1)C(=O)O"
+                    assert (
+                        my_cmp.get_smiles()
+                        == "CC(=O)OC1=C([CH][CH][CH][CH]1)C(=O)O"
+                    )
             else:
                 assert my_cmp.get_smiles() == test_string
 

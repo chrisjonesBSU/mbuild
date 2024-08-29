@@ -4,7 +4,7 @@ import mbuild as mb
 from mbuild import Compound, Port
 
 # TODO: Make a simple library for testing
-# from mbuild.react.library import react_library
+# from mbuild.library.react import react_library
 
 
 def load_reactant(string, name=None):
@@ -49,12 +49,12 @@ class Reactant(Compound):
         """"""
         # TODO: Make this a dict?
         sites = []
-        sites dict()
+        #sites dict()
         for p in self.particles():
             if p.element.atomic_number == 1:
                 continue
             if p.reactive and p.reaction_type == reaction_type:
-                sites[p] = dict("port":)
+                #sites[p] = dict("port":)
                 sites.append(
                     [p]
                     + [
@@ -76,10 +76,12 @@ class Reactant(Compound):
             raise AttributeError(
                 "Reaction types are immutable for Compounds that are "
                 "not at the bottom of the containment hierarchy."
+                "Setting reactive sites must be done at the particle level."
             )
         self._reactive = True
         self.reaction_type = reaction_type
         h_bonds = []
+        # Set all directly bonded hydrogens to reactive as well
         for p in self.direct_bonds():
             if p.element.atomic_number == 1:
                 p._reactive = True
