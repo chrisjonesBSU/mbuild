@@ -51,10 +51,12 @@ class Reactant(Compound):
         """"""
         # TODO: Make this a dict?
         sites = []
+        # sites dict()
         for p in self.particles():
             if p.element.atomic_number == 1:
                 continue
             if p.reactive and p.reaction_type == reaction_type:
+                # sites[p] = dict("port":)
                 sites.append(
                     [p]
                     + [
@@ -95,6 +97,7 @@ class Reactant(Compound):
 
 class Reaction(Compound):
     """"""
+
     def __init__(
         self,
         reactants=None,

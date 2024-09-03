@@ -9,7 +9,7 @@ from mbuild.lattice import Lattice
 from mbuild.packing import *
 from mbuild.pattern import *
 from mbuild.port import Port
-#from mbuild.react import Reaction, Reactant, load_reactant
+from mbuild.react import Reactant, Reaction, load_reactant
 from mbuild.recipes import recipes
 
 __version__ = "0.17.1"
