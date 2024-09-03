@@ -7,6 +7,8 @@ from mbuild import Compound, Port
 # from mbuild.library.react import react_library
 
 
+__all__ = ["load_reactant", "Reactant", "Reaction"]
+
 def load_reactant(string, name=None):
     """Load a compound using SMILES with reaction notation.
 
@@ -49,12 +51,10 @@ class Reactant(Compound):
         """"""
         # TODO: Make this a dict?
         sites = []
-        #sites dict()
         for p in self.particles():
             if p.element.atomic_number == 1:
                 continue
             if p.reactive and p.reaction_type == reaction_type:
-                #sites[p] = dict("port":)
                 sites.append(
                     [p]
                     + [
@@ -141,6 +141,7 @@ class Reaction(Compound):
             hs = [
                 p for p in site.direct_bonds() if p.element.atomic_number == 1
             ]
+            #TODO Assert len of hs, or figure out way to handle it without hs
             if bond_order == 1:
                 site.parent.remove(hs[0])
             elif bond_order == 2:
