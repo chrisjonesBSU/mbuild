@@ -1,5 +1,7 @@
 import re
 
+import numpy as np
+
 import mbuild as mb
 from mbuild import Compound, Port
 
@@ -8,6 +10,7 @@ from mbuild import Compound, Port
 
 
 __all__ = ["load_reactant", "Reactant", "Reaction"]
+
 
 def load_reactant(string, name=None):
     """Load a compound using SMILES with reaction notation.
@@ -23,7 +26,7 @@ def load_reactant(string, name=None):
     skip_strings = 0
     for idx, s in enumerate(string):
         if not s.isalpha():
-            if s == "*":
+            if s == "!":
                 reactive_indices.append(idx - (1 + skip_strings))
                 site_types.append("polymer")
             elif s == "^":
@@ -31,7 +34,8 @@ def load_reactant(string, name=None):
                 site_types.append("branch")
             skip_strings += 1
     # Get the actual SMILES string
-    smiles = string.replace("*", "")
+    smiles = string.replace("!", "")
+    smiles = string.replace("!", "")
     smiles = smiles.replace("^", "")
     mb_comp = mb.load(
         filename_or_object=smiles, smiles=True, compound=Reactant(name=name)
@@ -59,16 +63,8 @@ class Reactant(Compound):
                 # sites[p] = dict("port":)
                 sites.append(
                     [p]
-                    + [
-                        i
-                        for i in p.direct_bonds()
-                        if i.element.atomic_number == 1
-                    ]
-                    + [
-                        port
-                        for port in self.available_ports()
-                        if port.anchor is p
-                    ]
+                    + [i for i in p.direct_bonds() if i.element.atomic_number == 1]
+                    + [port for port in self.available_ports() if port.anchor is p]
                 )
         return sites
 
@@ -127,7 +123,7 @@ class Reaction(Compound):
 
     def _parse(self):
         """Generate connection algorithm given the sequence"""
-        components = []
+        # components = []
         component_str = re.split(r"(-|=)", self.sequence)
         return component_str
 
@@ -141,10 +137,8 @@ class Reaction(Compound):
         site2_anchor = site2_port.anchor
         # Remove hydrogens based on bond order
         for site in [site1_anchor, site2_anchor]:
-            hs = [
-                p for p in site.direct_bonds() if p.element.atomic_number == 1
-            ]
-            #TODO Assert len of hs, or figure out way to handle it without hs
+            hs = [p for p in site.direct_bonds() if p.element.atomic_number == 1]
+            # TODO Assert len of hs, or figure out way to handle it without hs
             if bond_order == 1:
                 site.parent.remove(hs[0])
             elif bond_order == 2:
