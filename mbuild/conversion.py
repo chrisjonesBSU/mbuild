@@ -7,6 +7,7 @@ from copy import deepcopy
 from pathlib import Path
 from warnings import warn
 
+import gmso
 import numpy as np
 import parmed as pmd
 from ele import (
@@ -19,20 +20,8 @@ from ele.exceptions import ElementError
 import mbuild as mb
 from mbuild.box import Box
 from mbuild.exceptions import MBuildError
-from mbuild.formats.gsdwriter import write_gsd
-from mbuild.formats.hoomdxml import write_hoomdxml
 from mbuild.formats.json_formats import compound_from_json, compound_to_json
-from mbuild.formats.lammpsdata import write_lammpsdata
-from mbuild.formats.par_writer import write_par
-from mbuild.formats.xyz import read_xyz, write_xyz
-from mbuild.utils.io import (
-    has_gmso,
-    has_mdtraj,
-    has_networkx,
-    has_openbabel,
-    has_rdkit,
-    import_,
-)
+from mbuild.utils.io import has_mdtraj, has_openbabel, import_
 
 
 def load(
@@ -40,7 +29,6 @@ def load(
     relative_to_module=None,
     compound=None,
     coords_only=False,
-    rigid=False,
     smiles=False,
     infer_hierarchy=True,
     backend=None,
@@ -59,9 +47,9 @@ def load(
     Parameters
     ----------
     filename_or_object : str, mdtraj.Trajectory, parmed.Structure,
-        mbuild.Compound, pybel.Molecule,
+        mbuild.Compound, pybel.Molecule.
         Name of the file or topology from which to load atom and bond
-        information.
+        information, or a valid SMILES string.
     relative_to_module : str, optional, default=None
         Instead of looking in the current working directory, look for the file
         where this module is defined. This is typically used in Compound
@@ -72,15 +60,13 @@ def load(
         will be added to the existing compound as a sub compound.
     coords_only : bool, optional, default=False
         Only load the coordinates into an existing compound.
-    rigid : bool, optional, default=False
-        Treat the compound as a rigid body
     backend : str, optional, default=None
         Backend used to load structure from file or string. If not specified, a
         default backend (extension specific) will be used.
     smiles: bool, optional, default=False
         Use RDKit or OpenBabel to parse filename as a SMILES string or file
         containing a SMILES string. If this is set to True, `rdkit` is the
-        default backend.
+        default backend and `filename_or_object` should be the SMILES string.
     infer_hierarchy : bool, optional, default=True
         If True, infer hierarchy from chains and residues
     ignore_box_warn : bool, optional, default=False
@@ -102,35 +88,44 @@ def load(
     structure's position (recommended).
     """
     # First check if we are loading from an object
-    if not isinstance(filename_or_object, str):
+    if not (
+        isinstance(filename_or_object, str)
+        or isinstance(filename_or_object, list)
+        or isinstance(filename_or_object, tuple)
+    ):
         return load_object(
             obj=filename_or_object,
             compound=compound,
             coords_only=coords_only,
-            rigid=rigid,
             infer_hierarchy=infer_hierarchy,
             **kwargs,
         )
     # Second check if we are loading SMILES strings
-    elif smiles:
+    elif smiles and (backend is None or backend.lower() == "rdkit"):
         # Ignore the box info for SMILES (its never there)
-        ignore_box_warn = True
-        return load_smiles(
+        seed = kwargs.get("seed", 0)
+        return load_rdkit_smiles(
             smiles_or_filename=filename_or_object,
             compound=compound,
             infer_hierarchy=infer_hierarchy,
-            ignore_box_warn=ignore_box_warn,
-            backend=backend,
-            **kwargs,
+            ignore_box_warn=True,
+            seed=seed,
         )
-    # Last, if none of the above, load from file
+    elif smiles and isinstance(backend, str) and backend.lower() == "pybel":
+        return load_pybel_smiles(
+            smiles_or_filename=filename_or_object,
+            compound=compound,
+            infer_hierarchy=infer_hierarchy,
+            ignore_box_warn=True,
+        )
+
     else:
+        # Last, if none of the above, load from file
         return load_file(
             filename=filename_or_object,
             relative_to_module=relative_to_module,
             compound=compound,
             coords_only=coords_only,
-            rigid=rigid,
             backend=backend,
             infer_hierarchy=infer_hierarchy,
             **kwargs,
@@ -141,7 +136,6 @@ def load_object(
     obj,
     compound=None,
     coords_only=False,
-    rigid=False,
     infer_hierarchy=True,
     **kwargs,
 ):
@@ -160,8 +154,6 @@ def load_object(
         The host mbuild Compound
     coords_only : bool, optional, default=False
         Only load the coordinates into existing compound.
-    rigid : bool, optional, default=False
-        Treat the compound as a rigid body
     infer_hierarchy : bool, optional, default=True
         If True, infer hiereachy from chains and residues
     **kwargs : keyword arguments
@@ -172,21 +164,20 @@ def load_object(
     mb.Compound
     """
     # Create type_dict type -> loading method
-    # Will need to add a gmso method soon
-    type_dict = {pmd.Structure: from_parmed}
-    if has_gmso:
-        gmso = import_("gmso")
-        type_dict.update({gmso.Topology: from_gmso})
+    type_dict = {
+        pmd.Structure: from_parmed,
+        gmso.Topology: from_gmso,
+    }
 
     if has_openbabel:
         pybel = import_("pybel")
         type_dict.update({pybel.Molecule: from_pybel})
-
     if has_mdtraj:
         md = import_("mdtraj")
         type_dict.update({md.Trajectory: from_trajectory})
 
     # Check if the given object is an mb.Compound
+    # TODO 1.0: What is the use case for this?
     if isinstance(obj, mb.Compound):
         if not compound:
             warn("Given object is already an mb.Compound, doing nothing.")
@@ -205,22 +196,18 @@ def load_object(
                 infer_hierarchy=infer_hierarchy,
                 **kwargs,
             )
-            if rigid:
-                compound.label_rigid_bodies()
             return compound
 
     # If nothing is return raise an error
-    raise ValueError(f"Object of type {type(obj).__name__} is not supported")
+    raise ValueError(f"Object of type {type(obj).__name__} is not supported.")
 
 
-def load_smiles(
+def load_pybel_smiles(
     smiles_or_filename,
     compound=None,
     infer_hierarchy=True,
     ignore_box_warn=False,
-    backend="rdkit",
     coords_only=False,
-    **kwargs,
 ):
     """Load a SMILES string as an mBuild Compound.
 
@@ -238,8 +225,59 @@ def load_smiles(
         If True, ignore warning if no box is present.
     coords_only : bool, optional, default=False
         Only load the coordinates into a provided compound.
-    backend : str, optional, default='rdkit'
-        The smiles loading backend, either 'rdkit' or 'pybel'
+
+    Returns
+    -------
+    compound : mb.Compound
+    """
+    if compound is None:
+        compound = mb.Compound()
+
+    pybel = import_("pybel")
+    # First we try treating smiles_or_filename as a SMILES string
+    try:
+        mymol = pybel.readstring("smi", smiles_or_filename)
+        mymolGen = [mymol]
+    # Now we treat it as a filename
+    except (OSError, IOError):
+        mymolGen = pybel.readfile("smi", smiles_or_filename)
+
+    for mymol in mymolGen:
+        mymol.make3D()
+        from_pybel(
+            pybel_mol=mymol,
+            compound=compound,
+            infer_hierarchy=infer_hierarchy,
+            ignore_box_warn=ignore_box_warn,
+        )
+
+    return compound
+
+
+def load_rdkit_smiles(
+    smiles_or_filename,
+    compound=None,
+    infer_hierarchy=True,
+    ignore_box_warn=False,
+    coords_only=False,
+    seed=0,
+):
+    """Load a SMILES string as an mBuild Compound.
+
+    Loading SMILES string from a string, a list, or a file using RDKit by
+    default. Must have rdkit or pybel packages installed.
+
+    Parameters
+    ----------
+    smiles_or_filename : str
+        SMILES string or file of SMILES string to load
+    compound : mb.Compound
+        The host mbuild Compound
+    infer_hierarchy : bool, optional, default=True
+    ignore_box_warn : bool, optional, default=False
+        If True, ignore warning if no box is present.
+    coords_only : bool, optional, default=False
+        Only load the coordinates into a provided compound.
 
     Returns
     -------
@@ -249,78 +287,53 @@ def load_smiles(
     if not compound:
         compound = mb.Compound()
 
-    test_path = Path(smiles_or_filename)
+    if not seed:  # default rdkit seed
+        seed = 0
 
-    # Will try to support list of smiles strings in the future
-    if backend is None:
-        backend = "rdkit"
+    rdkit = import_("rdkit")  # noqa: F841
+    from rdkit import Chem
 
-    if backend == "rdkit":
-        rdkit = import_("rdkit")
-        from rdkit import Chem
-        from rdkit.Chem import AllChem
+    if isinstance(smiles_or_filename, (tuple, list)):
+        for mol in smiles_or_filename:
+            rdmol = Chem.MolFromSmiles(mol)
+            from_rdkit(
+                rdkit_mol=rdmol,
+                compound=compound,
+                coords_only=coords_only,
+                smiles_seed=seed,
+            )
+        return compound
 
-        if test_path.exists():
-            # assuming this is a smi file now
-            mymol = Chem.SmilesMolSupplier(smiles_or_filename)
-            if not mymol:
-                raise ValueError(
-                    "Provided smiles string or file was invalid. Refer to the "
-                    "above RDKit error messages for additional information."
-                )
-            mol_list = [mol for mol in mymol]
-            if len(mol_list) == 1:
-                rdmol = mymol[0]
-            else:
-                rdmol = mymol[0]
-                warn(
-                    "More than one SMILES string in file, more than one SMILES "
-                    f"string is not supported, using {Chem.MolToSmiles(rdmol)}"
-                )
-        else:
-            rdmol = Chem.MolFromSmiles(smiles_or_filename)
-
-        seed = kwargs.get("smiles_seed", 0)
-
+    rdmol = Chem.MolFromSmiles(smiles_or_filename)
+    if rdmol:  # return right away if the smiles loads properly
         return from_rdkit(
             rdkit_mol=rdmol,
             compound=compound,
             coords_only=coords_only,
             smiles_seed=seed,
         )
-    elif backend == "pybel":
-        pybel = import_("pybel")
-        # First we try treating filename_or_object as a SMILES string
-        try:
-            mymol = pybel.readstring("smi", smiles_or_filename)
-        # Now we treat it as a filename
-        except (OSError, IOError):
-            # For now, we only support reading in a single smiles molecule,
-            # but pybel returns a generator, so we get the first molecule
-            # and warn the user if there is more
 
-            mymol_generator = pybel.readfile("smi", smiles_or_filename)
-            mymol_list = list(mymol_generator)
-            if len(mymol_list) == 1:
-                mymol = mymol_list[0]
-            else:
-                mymol = mymol_list[0]
-                warn(
-                    "More than one SMILES string in file, more than one SMILES "
-                    f"string is not supported, using {mymol.write('smi')}"
-                )
-        mymol.make3D()
-        return from_pybel(
-            pybel_mol=mymol,
-            compound=compound,
-            infer_hierarchy=infer_hierarchy,
-            ignore_box_warn=ignore_box_warn,
-        )
-    else:
+    # Try to assume it's a smiles file
+    mymol = Chem.SmilesMolSupplier(smiles_or_filename, titleLine=0)
+    if not mymol:
         raise ValueError(
-            "Expected SMILES loading backend 'rdkit' or 'pybel'. "
-            f"Was provided: {backend}"
+            "Provided smiles string or file was invalid. Refer to the "
+            "above RDKit error messages for additional information."
         )
+    molList = [mol for mol in mymol]
+    for rdmol in molList:
+        from_rdkit(
+            rdkit_mol=rdmol,
+            compound=compound,
+            coords_only=coords_only,
+            smiles_seed=seed,
+        )
+    if not compound:
+        raise ValueError(
+            "Expected SMILES loading backend 'rdkit' failed to load any compouds."
+            f"Check the SMILES string of .smi file passed to {smiles_or_filename=}"
+        )
+    return compound
 
 
 def load_file(
@@ -328,7 +341,6 @@ def load_file(
     relative_to_module=None,
     compound=None,
     coords_only=False,
-    rigid=False,
     backend=None,
     infer_hierarchy=True,
     **kwargs,
@@ -353,8 +365,6 @@ def load_file(
         will be added to the existing compound as a sub compound.
     coords_only : bool, optional, default=False
         Only load the coordinates into an existing compound.
-    rigid : bool, optional, default=False
-        Treat the compound as a rigid body
     backend : str, optional, default=None
         Backend used to load structure from file. If not specified, a default
         backend (extension specific) will be used.
@@ -374,28 +384,22 @@ def load_file(
     # Need to come up with a different dict structure
     default_backends = {
         ".json": "internal",
-        ".xyz": "internal",
+        ".xyz": "gmso",
         ".sdf": "pybel",
-        ".hoomdxml": "mdtraj",
-        ".mol2": "mdtraj",
+        ".mol2": "gmso",
         ".pdb": "mdtraj",
     }
-
     # Handle mbuild *.py files containing a class that wraps a structure file
     # in its own folder. E.g., you build a system from ~/foo.py and it imports
     # from ~/bar/baz.py where baz.py loads ~/bar/baz.pdb.
     if relative_to_module:
-        filename = str(
-            Path(sys.modules[relative_to_module].__file__).parent / filename
-        )
+        filename = str(Path(sys.modules[relative_to_module].__file__).parent / filename)
     extension = Path(filename).suffix
 
     if not backend:
-        try:
-            # Try matching backend based on extension
+        try:  # Try matching backend based on extension
             backend = default_backends[extension]
-        except KeyError:
-            # Else use default backend
+        except KeyError:  # Else use default backend
             backend = "mdtraj" if has_mdtraj else "parmed"
 
     # First check internal readers
@@ -406,29 +410,8 @@ def load_file(
             compound = compound_from_json(filename)
             return compound
         # Handle xyz file
-        if extension == ".xyz" and not "top" in kwargs:
-            if coords_only:
-                tmp = read_xyz(filename)
-                if tmp.n_particles != compound.n_particles:
-                    raise ValueError(
-                        f"Number of atoms in {filename}"
-                        f"does not match {compound}"
-                    )
-                ref_and_compound = zip(
-                    tmp._particles(include_ports=False),
-                    compound.particles(include_ports=False),
-                )
-                for ref_particle, particle in ref_and_compound:
-                    particle.pos = ref_particle.pos
-            else:
-                compound = read_xyz(filename, compound=compound)
-        elif extension == ".xyz" and "top" in kwargs:
-            backend = "mdtraj"
-
     # Then gmso reader
     if backend == "gmso":
-        gmso = import_("gmso")
-
         top = gmso.Topology.load(filename=filename, **kwargs)
         compound = from_gmso(
             topology=top,
@@ -443,8 +426,7 @@ def load_file(
         if extension == ".sdf":
             pybel_mol = pybel.readfile("sdf", filename)
             # pybel returns a generator, so we grab the first molecule of a
-            # list of len 1.
-            # Raise ValueError if there are more molecules
+            # list of len 1. Raise ValueError if there are more molecules
             pybel_mol = [i for i in pybel_mol]
             if len(pybel_mol) == 1:
                 compound = from_pybel(
@@ -463,7 +445,7 @@ def load_file(
         elif extension == ".txt":
             warn(".txt file detected, loading as a SMILES string")
             # Fail-safe measure
-            compound = load_smiles(filename, compound)
+            compound = load_pybel_smiles(filename, compound)
 
     # Then mdtraj reader
     elif backend == "mdtraj":
@@ -493,9 +475,6 @@ def load_file(
         )
     # Note: 'Input not supported' error will be handled
     # by the corresponding backend
-    if rigid:
-        compound.label_rigid_bodies()
-
     return compound
 
 
@@ -533,9 +512,7 @@ def from_parmed(
         for pmd_atom, particle in zip(
             structure.atoms, compound.particles(include_ports=False)
         ):
-            particle.pos = (
-                np.array([pmd_atom.xx, pmd_atom.xy, pmd_atom.xz]) / 10
-            )
+            particle.pos = np.array([pmd_atom.xx, pmd_atom.xy, pmd_atom.xz]) / 10
         return compound
     elif not compound and coords_only:
         raise MBuildError("coords_only=True but host compound is not provided")
@@ -546,7 +523,6 @@ def from_parmed(
 
     # Convert parmed structure to mbuild compound
     atom_mapping = dict()
-    chain_id = None
     chains = defaultdict(list)
 
     # Build up chains dict
@@ -579,9 +555,7 @@ def from_parmed(
                     element = element_from_atomic_number(atom.atomic_number)
                 except ElementError:
                     element = None
-                new_atom = mb.Particle(
-                    name=str(atom.name), pos=pos, element=element
-                )
+                new_atom = mb.Particle(name=str(atom.name), pos=pos, element=element)
                 atom_list.append(new_atom)
                 atom_label_list.append(f"{atom.name}[$]")
                 atom_mapping[atom] = new_atom
@@ -640,9 +614,7 @@ def from_trajectory(
     if compound and coords_only:
         if traj.n_atoms != compound.n_particles:
             raise ValueError(
-                "Number of atoms in {traj} does not match {compound}".format(
-                    **locals()
-                )
+                "Number of atoms in {traj} does not match {compound}".format(**locals())
             )
         if None in compound._particles(include_ports=False):
             raise ValueError("Some particles are None")
@@ -686,9 +658,7 @@ def from_trajectory(
             atom_label_list = []
             for atom in res.atoms:
                 try:
-                    element = element_from_atomic_number(
-                        atom.element.atomic_number
-                    )
+                    element = element_from_atomic_number(atom.element.atomic_number)
                 except ElementError:
                     element = None
                 new_atom = mb.Particle(
@@ -967,15 +937,9 @@ def save(
     compound,
     filename,
     include_ports=False,
-    forcefield_name=None,
-    forcefield_files=None,
-    forcefield_debug=False,
     box=None,
     overwrite=False,
     residues=None,
-    combining_rule=None,
-    foyer_kwargs=None,
-    parmed_kwargs=None,
     **kwargs,
 ):
     """Save the Compound to a file.
@@ -987,22 +951,10 @@ def save(
     filename : str
         Filesystem path in which to save the trajectory. The extension or prefix
         will be parsed and control the format. Supported extensions are:
-        'hoomdxml', 'gsd', 'gro', 'top', 'lammps', 'lmp', 'mcf', 'xyz', 'pdb',
-        'sdf', 'mol2', 'psf'. See parmed/structure.py for more information on
-        savers.
+        'gsd', 'gro', 'top', 'mcf', 'xyz', 'pdb', 'sdf', 'mol2', 'psf'.
+        See parmed/structure.py for more information on savers.
     include_ports : bool, optional, default=False
         Save ports contained within the compound.
-    forcefield_files : str, optional, default=None
-        Apply a forcefield to the output file using a forcefield provided by the
-        `foyer` package.
-    forcefield_name : str, optional, default=None
-        Apply a named forcefield to the output file using the `foyer` package,
-        e.g. 'oplsaa'. Forcefields listed here:
-        https://github.com/mosdef-hub/foyer/tree/master/foyer/forcefields
-    forcefield_debug : bool, optional, default=False
-        Choose level of verbosity when applying a forcefield through `foyer`.
-        Specifically, when missing atom types in the forcefield xml file,
-        determine if the warning is condensed or verbose.
     box : mb.Box, optional, default=compound.boundingbox (with buffer)
         Box information to be written to the output file. If 'None', a bounding
         box is used with 0.25nm buffers at each face to avoid overlapping atoms.
@@ -1011,44 +963,24 @@ def save(
     residues : str of list of str
         Labels of residues in the Compound. Residues are assigned by checking
         against Compound.name.
-    combining_rule : str or None, optional, default=None
-        Specify the combining rule for nonbonded interactions. Only relevant
-        when the `foyer` package is used to apply a forcefield. Valid options
-        are 'lorentz' and 'geometric' and None, specifying Lorentz-Berthelot and
-        geometric combining rules respectively. If None is provided, the combining_rule
-        specified from the forcefield will be used.
-    foyer_kwargs : dict, optional, default=None
-        Keyword arguments to provide to `foyer.Forcefield.apply`.
-    parmed_kwargs : dict, optional, default=None
-        Keyword arguments to provide to :meth:`mbuild.Compound.to_parmed`
-    **kwargs
+    **kwargs : dict, optional
         Depending on the file extension these will be passed to either
-        `write_gsd`, `write_hoomdxml`, `write_lammpsdata`, `write_mcf`, or
-        `parmed.Structure.save`.
+        GMSO's intenral writers or `parmed.Structure.save`.
+        See https://github.com/mosdef-hub/gmso/tree/main/gmso/formats
         See https://parmed.github.io/ParmEd/html/structobj/parmed.structure.
         Structure.html#parmed.structure.Structure.save
 
     Other Parameters
     ----------------
     ref_distance : float, optional, default=1.0
-        Normalization factor used when saving to .gsd and .hoomdxml formats for
+        Normalization factor used when saving to .gsd formats for
         converting distance values to reduced units.
     ref_energy : float, optional, default=1.0
-        Normalization factor used when saving to .gsd and .hoomdxml formats for
+        Normalization factor used when saving to .gsd formats for
         converting energy values to reduced units.
     ref_mass : float, optional, default=1.0
-        Normalization factor used when saving to .gsd and .hoomdxml formats for
+        Normalization factor used when saving to .gsd formats for
         converting mass values to reduced units.
-    atom_style: str, default='full'
-        Defines the style of atoms to be saved in a LAMMPS data file. The
-        following atom styles are currently supported: 'full', 'atomic',
-        'charge', 'molecular'. See http://lammps.sandia.gov/doc/atom_style.html
-        for more information on atom styles.
-    unit_style: str, default='real'
-        Defines to unit style to be save in a LAMMPS data file.  Defaults to
-        'real' units. Current styles are supported: 'real', 'lj'. See
-        https://lammps.sandia.gov/doc/99/units.html for more information on
-        unit styles
 
     Notes
     -----
@@ -1058,113 +990,75 @@ def save(
 
     See Also
     --------
-    formats.gsdwriter.write_gsd : Write to GSD format
-    formats.hoomdxml.write_hoomdxml : Write to Hoomd XML format
-    formats.xyzwriter.write_xyz : Write to XYZ format
-    formats.lammpsdata.write_lammpsdata : Write to LAMMPS data format
     formats.cassandramcf.write_mcf : Write to Cassandra MCF format
     formats.json_formats.compound_to_json : Write to a json file
     """
-    extension = os.path.splitext(filename)[-1]
+    if os.path.exists(filename) and not overwrite:
+        raise IOError(f"{filename} exists; not overwriting")
+    if compound.charge:
+        if round(compound.charge, 4) != 0.0:
+            warn(f"System is not charge neutral. Total charge is {compound.charge}.")
 
+    extension = os.path.splitext(filename)[-1]
+    # Keep json stuff with internal mbuild method
     if extension == ".json":
-        compound_to_json(
-            compound, file_path=filename, include_ports=include_ports
-        )
+        compound_to_json(compound, file_path=filename, include_ports=include_ports)
         return
 
     # Savers supported by mbuild.formats
     savers = {
-        ".hoomdxml": write_hoomdxml,
-        ".gsd": write_gsd,
-        ".xyz": write_xyz,
-        ".lammps": write_lammpsdata,
-        ".lmp": write_lammpsdata,
-        ".par": write_par,
+        ".gro": save_in_gmso,
+        ".gsd": save_in_gmso,
+        ".data": save_in_gmso,
+        ".xyz": save_in_gmso,
+        # ".mol2": save_in_gmso,
+        ".mcf": save_in_gmso,
+        ".top": save_in_gmso,
     }
-    if has_networkx:
-        from mbuild.formats.cassandramcf import write_mcf
-
-        savers.update({".mcf": write_mcf})
 
     try:
         saver = savers[extension]
     except KeyError:
         saver = None
-
-    if os.path.exists(filename) and not overwrite:
-        raise IOError(f"{filename} exists; not overwriting")
-
-    if not parmed_kwargs:
-        parmed_kwargs = {}
-    structure = compound.to_parmed(
-        box=box,
-        residues=residues,
-        include_ports=include_ports,
-        **parmed_kwargs,
-    )
-    # Apply a force field with foyer if specified
-    if forcefield_name or forcefield_files:
-        foyer = import_("foyer")
-        ff = foyer.Forcefield(
-            forcefield_files=forcefield_files,
-            name=forcefield_name,
-            debug=forcefield_debug,
-        )
-
-        if not foyer_kwargs:
-            foyer_kwargs = {}
-        structure = ff.apply(structure, **foyer_kwargs)
-
-        if combining_rule is None:
-            combining_rule = structure.combining_rule
-
-        if structure.combining_rule != combining_rule:
-            warn(
-                f"Overwriting forcefield-specified combining rule ({combining_rule})"
-                f"to new combining rule ({combining_rule})."
-                "This can cause inconsistent between the 1-4 pair interactions,"
-                "calculated in foyer, and the new combining rule."
-                "Consider directly changing the metadata of the Forcefield."
-            )
-
-        structure.combining_rule = combining_rule
-        if structure.__dict__.get("defaults"):
-            structure.defaults.comb_rule = (
-                2 if combining_rule == "lorentz" else 3
-            )
-
-    total_charge = sum([atom.charge for atom in structure])
-    if round(total_charge, 4) != 0.0:
-        warn(f"System is not charge neutral. Total charge is {total_charge}.")
-
-    # Provide a warning if rigid_ids are not sequential from 0
-    if compound.contains_rigid:
-        unique_rigid_ids = sorted(
-            set([p.rigid_id for p in compound.rigid_particles()])
-        )
-        if max(unique_rigid_ids) != len(unique_rigid_ids) - 1:
-            warn("Unique rigid body IDs are not sequential starting from zero.")
-
     if saver:  # mBuild supported saver.
-        if extension in [".gsd", ".hoomdxml"]:
-            kwargs["rigid_bodies"] = [p.rigid_id for p in compound.particles()]
-        saver(filename=filename, structure=structure, **kwargs)
+        # Calling save_in_gmso
+        saver(
+            filename=filename,
+            compound=compound,
+            box=box,
+            overwrite=overwrite,
+            **kwargs,
+        )
 
     elif extension == ".sdf":
         pybel = import_("pybel")
-        new_compound = mb.Compound()
-        # Convert pmd.Structure to mb.Compound
-        new_compound.from_parmed(structure)
-        # Convert mb.Compound to pybel molecule
-        pybel_molecule = new_compound.to_pybel()
+        pybel_molecule = compound.to_pybel()
         # Write out pybel molecule to SDF file
         output_sdf = pybel.Outputfile("sdf", filename, overwrite=overwrite)
         output_sdf.write(pybel_molecule)
         output_sdf.close()
-
     else:  # ParmEd supported saver.
+        structure = compound.to_parmed()
         structure.save(filename, overwrite=overwrite, **kwargs)
+
+
+def save_in_gmso(compound, filename, box, overwrite, **kwargs):
+    """Convert to GMSO, call GMSO internal writers.
+
+    Parameters
+    ----------
+    compound : mbuild.compound.Compound, required.
+        The mBuild compound to convert to a GSMO topology.
+    box : mbuild.box.Box, required
+        The mBuild box to be converted to a gmso box, if different that compound.box
+    overwrite : bool, required
+        If `True` overwrite the file if it already exists.
+    **kwargs
+        Keyword arguments used in GMSO's savers.
+        See https://github.com/mosdef-hub/gmso/tree/main/gmso/formats
+    """
+    gmso_top = to_gmso(compound=compound, box=box)
+    gmso_top.save(filename=filename, overwrite=overwrite, **kwargs)
 
 
 def catalog_bondgraph_type(compound, bond_graph=None):
@@ -1208,9 +1102,7 @@ def catalog_bondgraph_type(compound, bond_graph=None):
         return "multiple_graphs"
 
 
-def pull_residues(
-    compound, segment_level=0, include_base_level=False, bond_graph=None
-):
+def pull_residues(compound, segment_level=0, include_base_level=False, bond_graph=None):
     """Pull residues from a Compound object.
 
     Search class instance for completed compounds based on the number of
@@ -1259,9 +1151,7 @@ def pull_residues(
     elif segment_level == 0 and compound_graphtype == "one_graph":
         # At top level and a single molecule is here
         residuesList.append(id(compound))
-    elif (
-        compound_graphtype == "particle_graph"
-    ):  # Currently at the particle level
+    elif compound_graphtype == "particle_graph":  # Currently at the particle level
         if include_base_level:
             # only consider adding particles if specified
             residuesList.append(id(compound))
@@ -1296,6 +1186,62 @@ def pull_residues(
         raise ValueError("`segment_level` must be greater than zero.")
 
     return residuesList
+
+
+def to_hoomdsnapshot(
+    compound,
+    identify_connections=True,
+    ref_distance=1.0,
+    ref_mass=1.0,
+    shift_coords=True,
+    write_special_pairs=True,
+    **kwargs,
+):
+    """Output a gsd.hoomd.Frame (HOOMD-Blue topology format).
+
+    Parameters
+    ----------
+    compound : mb.Compound
+        mBuild compound to save to the GSD format.
+    identify_connections : bool
+        If `True`, then infer angles and dihedrals in the topology.
+    ref_distance : float, optional, default=1.0
+        Reference distance for conversion to reduced units
+    ref_mass : float, optional, default=1.0
+        Reference mass for conversion to reduced units
+    shift_coords : bool, optional, default=True
+        Shift coordinates from (0, L) to (-L/2, L/2) if necessary.
+    write_special_pairs : bool, optional, default=True
+        Writes out special pair information necessary to correctly use the OPLS
+        fudged 1,4 interactions in HOOMD-Blue.
+
+    Notes
+    -----
+    See gmso.external.convert_hoomd on how to make sure the GSD file contains
+    forcefield information (e.g. atom types, angle types, etc.).
+    """
+    import unyt as u
+    from gmso.external import from_mbuild, to_gsd_snapshot
+
+    gmso_top = from_mbuild(compound=compound)
+
+    if identify_connections:
+        gmso_top.identify_connections()
+
+    base_units = {
+        "length": ref_distance * u.Unit("nm"),
+        "mass": ref_mass * u.Unit("amu"),
+        "energy": 1 * u.Unit("kJ/mol"),
+    }
+
+    snapshot, refs = to_gsd_snapshot(
+        top=gmso_top,
+        base_units=base_units,
+        shift_coords=shift_coords,
+        parse_special_pairs=write_special_pairs,
+        auto_scale=False,
+    )
+    return snapshot
 
 
 def to_parmed(
@@ -1386,9 +1332,7 @@ def to_parmed(
                     if residues and tmp_check in residues:
                         if parent not in compound_residue_map:
                             current_residue = pmd.Residue(
-                                parent.name
-                                if parent.name
-                                else default_residue.name
+                                parent.name if parent.name else default_residue.name
                             )
                             compound_residue_map[parent] = current_residue
                         atom_residue_map[atom] = current_residue
@@ -1459,9 +1403,7 @@ def to_parmed(
     return structure
 
 
-def to_trajectory(
-    compound, include_ports=False, chains=None, residues=None, box=None
-):
+def to_trajectory(compound, include_ports=False, chains=None, residues=None, box=None):
     """Convert to an md.Trajectory and flatten the compound.
 
     Parameters
@@ -1538,7 +1480,7 @@ def _to_topology(compound, atom_list, chains=None, residues=None):
     --------
     mdtraj.Topology : Details on the mdtraj Topology object
     """
-    md = import_("mdtraj")
+    md = import_("mdtraj")  # noqa: F841
     from mdtraj.core.element import get_by_symbol
     from mdtraj.core.topology import Topology
 
@@ -1574,9 +1516,7 @@ def _to_topology(compound, atom_list, chains=None, residues=None):
                         if parent not in compound_chain_map:
                             current_chain = top.add_chain()
                             compound_chain_map[parent] = current_chain
-                            current_residue = top.add_residue(
-                                "RES", current_chain
-                            )
+                            current_residue = top.add_residue("RES", current_chain)
                         break
                 else:
                     current_chain = default_chain
@@ -1778,9 +1718,8 @@ def to_rdkit(compound):
     -------
     rdkit.Chem.RWmol
     """
-    rdkit = import_("rdkit")
+    rdkit = import_("rdkit")  # noqa: F841
     from rdkit import Chem
-    from rdkit.Chem import AllChem
 
     for particle in compound.particles():
         if particle.element is None:
@@ -1811,12 +1750,9 @@ def to_rdkit(compound):
 
     for particle in compound.particles():
         temp_atom = Chem.Atom(particle.element.atomic_number)
-
         # this next line is necessary to prevent rdkit from adding hydrogens
         # this will also set the label to be the element with particle index
-        temp_atom.SetProp(
-            "atomLabel", f"{temp_atom.GetSymbol()}:{p_dict[particle]}"
-        )
+        temp_atom.SetProp("atomLabel", f"{temp_atom.GetSymbol()}:{p_dict[particle]}")
 
         temp_mol.AddAtom(temp_atom)
 
@@ -1846,10 +1782,7 @@ def to_smiles(compound, backend="pybel"):
     if backend == "pybel":
         mol = to_pybel(compound)
 
-        warn(
-            "The bond orders will be guessed using pybel"
-            "OBMol.PerceviedBondOrders()"
-        )
+        warn("The bond orders will be guessed using pybelOBMol.PerceviedBondOrders()")
         mol.OBMol.PerceiveBondOrders()
         smiles_string = mol.write("smi").replace("\t", " ").split(" ")[0]
 
@@ -1890,9 +1823,7 @@ def to_networkx(compound, names_only=False):
         nodes.append(compound.name + "_" + str(id(compound)))
     else:
         nodes.append(compound)
-    nodes, edges = _iterate_children(
-        compound, nodes, edges, names_only=names_only
-    )
+    nodes, edges = _iterate_children(compound, nodes, edges, names_only=names_only)
 
     graph = nx.DiGraph()
     graph.add_nodes_from(nodes)
@@ -1910,21 +1841,24 @@ def _iterate_children(compound, nodes, edges, names_only=False):
     for child in compound.children:
         if names_only:
             unique_name = child.name + "_" + str(id(child))
-            unique_name_parent = (
-                child.parent.name + "_" + str((id(child.parent)))
-            )
+            unique_name_parent = child.parent.name + "_" + str((id(child.parent)))
             nodes.append(unique_name)
             edges.append([unique_name_parent, unique_name])
         else:
             nodes.append(child)
             edges.append([child.parent, child])
-        nodes, edges = _iterate_children(
-            child, nodes, edges, names_only=names_only
-        )
+        nodes, edges = _iterate_children(child, nodes, edges, names_only=names_only)
     return nodes, edges
 
 
-def to_gmso(compound, box=None, **kwargs):
+def to_gmso(
+    compound,
+    box=None,
+    parse_label=True,
+    custom_groups=None,
+    infer_elements=False,
+    **kwargs,
+):
     """Create a GMSO Topology from a mBuild Compound.
 
     Parameters
@@ -1941,7 +1875,13 @@ def to_gmso(compound, box=None, **kwargs):
     """
     from gmso.external.convert_mbuild import from_mbuild
 
-    return from_mbuild(compound, box=None, **kwargs)
+    return from_mbuild(
+        compound=compound,
+        box=box,
+        parse_label=parse_label,
+        custom_groups=custom_groups,
+        infer_elements=infer_elements,
+    )
 
 
 def to_intermol(compound, molecule_types=None):  # pragma: no cover

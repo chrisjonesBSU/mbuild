@@ -98,8 +98,7 @@ class Polymer(Compound):
             )
         elif len(self._end_groups) != 2:
             raise ValueError(
-                "Please provide two end groups; "
-                f"you provided {len(self._end_groups)}"
+                f"Please provide two end groups; you provided {len(self._end_groups)}"
             )
         self._port_labels = ["up", "down"]
         self._headtail = [None, None]
@@ -198,9 +197,7 @@ class Polymer(Compound):
                 break
 
         self.head_port = first_part["up"] if not first_part["up"].used else None
-        self.tail_port = (
-            last_part["down"] if not last_part["down"].used else None
-        )
+        self.tail_port = last_part["down"] if not last_part["down"].used else None
 
         head_tail = [self.head_port, self.tail_port]
         for i, compound in enumerate(self._end_groups):
@@ -238,23 +235,6 @@ class Polymer(Compound):
         for port in self.all_ports():
             if id(port) not in port_ids:
                 self.remove(port)
-
-    def coarse_grain(self):
-        """Create a coarse-grained representation of the atomistic polymer."""
-        cg_polymer = Compound()
-        last_bead = None
-        for i, bead in enumerate(self.sequence * self.n):
-            aa_comp = self.children[i]
-            bead_comp = Compound(
-                    name=bead,
-                    mass=aa_comp.mass,
-                    pos=aa_comp.center
-            )
-            cg_polymer.add(bead_comp)
-            if last_bead:
-                cg_polymer.add_bond([bead_comp, last_bead])
-            last_bead = bead_comp
-        return cg_polymer
 
     def add_monomer(
         self,
@@ -398,9 +378,7 @@ class Polymer(Compound):
             `add_end_groups()` a second time to add another end group.
         """
         comp = clone(compound)
-        separation = _add_port(
-            comp, "up", index, separation, orientation, replace
-        )
+        separation = _add_port(comp, "up", index, separation, orientation, replace)
         if replace:
             comp.remove(comp[index])
         if duplicate:

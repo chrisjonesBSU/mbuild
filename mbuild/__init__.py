@@ -1,3 +1,5 @@
+# ruff: noqa: F401
+# ruff: noqa: F403
 """mBuild: a hierarchical, component based molecule builder."""
 
 from mbuild.box import Box
@@ -12,4 +14,5 @@ from mbuild.port import Port
 from mbuild.react import Reactant, Reaction, load_reactant
 from mbuild.recipes import recipes
 
-__version__ = "0.17.1"
+__version__ = "1.1.1"
+__date__ = "2025-01-23"

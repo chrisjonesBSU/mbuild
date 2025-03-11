@@ -26,7 +26,6 @@ from mbuild.coordinate_transform import _rotate, _translate
 from mbuild.exceptions import MBuildError
 from mbuild.periodic_kdtree import PeriodicKDTree
 from mbuild.utils.decorators import experimental_feature
-from mbuild.utils.exceptions import RemovedFuncError
 from mbuild.utils.io import import_, run_from_ipython
 from mbuild.utils.jsutils import overwrite_nglview_default
 
@@ -48,12 +47,10 @@ def clone(existing_compound, clone_of=None, root_container=None):
     if clone_of is None:
         clone_of = dict()
 
-    newone = existing_compound._clone(
-        clone_of=clone_of, root_container=root_container
-    )
+    newone = existing_compound._clone(clone_of=clone_of, root_container=root_container)
     existing_compound._clone_bonds(clone_of=clone_of)
     # Set reactions
-    #for idx, p in enumerate(existing_compound.particles()):
+    # for idx, p in enumerate(existing_compound.particles()):
     #    if p.reactive:
     #        newone[idx].set_reactive(p.reaction_type)
     #    else:
@@ -133,17 +130,10 @@ class Compound(object):
         compound is the root of the containment hierarchy.
     referrers : set
         Other compounds that reference this part with labels.
-    rigid_id : int, default=None
-        The ID of the rigid body that this Compound belongs to.  Only Particles
-        (the bottom of the containment hierarchy) can have integer values for
-        `rigid_id`. Compounds containing rigid particles will always have
-        `rigid_id == None`. See also `contains_rigid`.
     boundingbox : mb.Box
         The bounds (xmin, xmax, ymin, ymax, zmin, zmax) of particles in Compound
     center
-    contains_rigid
     mass
-    max_rigid_id
     n_particles
     n_bonds
     root
@@ -189,13 +179,10 @@ class Compound(object):
 
         self.port_particle = port_particle
 
-        self._rigid_id = None
-        self._contains_rigid = False
-        self._check_if_contains_rigid_bodies = False
         self._reactive = False
         self.reaction_type = None
-
         self.element = element
+
         if mass and float(mass) < 0.0:
             raise ValueError("Cannot set a Compound mass value less than zero")
         self._box = box
@@ -336,7 +323,7 @@ class Compound(object):
         )
 
         # if index is specified, ensure we are not selecting an index out of range
-        if not index is None:
+        if index is not None:
             if index >= len(self.children):
                 raise MBuildError(
                     f"Index {index} out of range. The number of first level nodes in the tree is {len(self.children)}."
@@ -410,7 +397,7 @@ class Compound(object):
 
             identifier = f"{child.name}_{len(child.children)}_{child_string}_{child.n_particles}_{part_string}_{n_bonds}"
 
-            if not identifier in duplicates:
+            if identifier not in duplicates:
                 duplicates[identifier] = [1, True]
             else:
                 duplicates[identifier][0] += 1
@@ -526,9 +513,7 @@ class Compound(object):
                     f"Some particle of {self} does not have mass."
                     "They will not be accounted for during this calculation."
                 )
-            filtered_masses = [
-                mass for mass in particle_masses if mass is not None
-            ]
+            filtered_masses = [mass for mass in particle_masses if mass is not None]
             return sum(filtered_masses) if filtered_masses else None
 
     @staticmethod
@@ -545,8 +530,7 @@ class Compound(object):
     def mass(self, value):
         if self._contains_only_ports() is False:
             raise MBuildError(
-                "Cannot set the mass of a Compound containing "
-                "children compounds"
+                "Cannot set the mass of a Compound containing children compounds"
             )
 
         value = float(value)
@@ -559,8 +543,7 @@ class Compound(object):
         """Check if a particle is set as a reactive site."""
         if self._contains_only_ports() is False:
             raise MBuildError(
-                "Cannot set the mass of a Compound containing "
-                "children compounds"
+                "Cannot set the mass of a Compound containing children compounds"
             )
         return self._reactive
 
@@ -601,230 +584,6 @@ class Compound(object):
                 "not at the bottom of the containment hierarchy."
             )
 
-    @property
-    def rigid_id(self):
-        """Get the rigid_id of the Compound."""
-        return self._rigid_id
-
-    @rigid_id.setter
-    def rigid_id(self, value):
-        if self._contains_only_ports():
-            self._rigid_id = value
-            for ancestor in self.ancestors():
-                ancestor._check_if_contains_rigid_bodies = True
-        else:
-            raise AttributeError(
-                "rigid_id is immutable for Compounds that are "
-                "not at the bottom of the containment hierarchy."
-            )
-
-    @property
-    def contains_rigid(self):
-        """Return True if the Compound contains rigid bodies.
-
-        If the Compound contains any particle with a rigid_id != None
-        then contains_rigid will return True. If the Compound has no
-        children (i.e. the Compound resides at the bottom of the containment
-        hierarchy) then contains_rigid will return False.
-
-        Returns
-        -------
-        bool,
-            True if the Compound contains any particle with a rigid_id != None
-
-        Notes
-        -----
-        The private variable '_check_if_contains_rigid_bodies' is used to help
-        cache the status of 'contains_rigid'.
-        If '_check_if_contains_rigid_bodies' is False, then the rigid body
-        containment of the Compound has not changed, and the particle tree is
-        not traversed, boosting performance.
-        """
-        if self._check_if_contains_rigid_bodies:
-            self._check_if_contains_rigid_bodies = False
-            if any(p.rigid_id is not None for p in self._particles()):
-                self._contains_rigid = True
-            else:
-                self._contains_rigid = False
-        return self._contains_rigid
-
-    @property
-    def max_rigid_id(self):
-        """Return the maximum rigid body ID contained in the Compound.
-
-        This is usually used by compound.root to determine the maximum
-        rigid_id in the containment hierarchy.
-
-        Returns
-        -------
-        int or None
-            The maximum rigid body ID contained in the Compound. If no
-            rigid body IDs are found, None is returned
-        """
-        try:
-            return max(
-                [p.rigid_id for p in self.particles() if p.rigid_id is not None]
-            )
-        except ValueError:
-            return
-
-    def rigid_particles(self, rigid_id=None):
-        """Generate all particles in rigid bodies.
-
-        If a rigid_id is specified, then this function will only yield particles
-        with a matching rigid_id.
-
-        Parameters
-        ----------
-        rigid_id : int, optional
-            Include only particles with this rigid body ID
-
-        Yields
-        ------
-        mb.Compound
-            The next particle with a rigid_id that is not None, or the next
-            particle with a matching rigid_id if specified
-        """
-        for particle in self.particles():
-            if rigid_id is not None:
-                if particle.rigid_id == rigid_id:
-                    yield particle
-            else:
-                if particle.rigid_id is not None:
-                    yield particle
-
-    def label_rigid_bodies(self, discrete_bodies=None, rigid_particles=None):
-        """Designate which Compounds should be treated as rigid bodies.
-
-        If no arguments are provided, this function will treat the compound
-        as a single rigid body by providing all particles in `self` with the
-        same rigid_id. If `discrete_bodies` is not None, each instance of
-        a Compound with a name found in `discrete_bodies` will be treated as a
-        unique rigid body. If `rigid_particles` is not None, only Particles
-        (Compounds at the bottom of the containment hierarchy) matching this
-        name will be considered part of the rigid body.
-
-        Parameters
-        ----------
-        discrete_bodies : str or list of str, optional, default=None
-            Name(s) of Compound instances to be treated as unique rigid bodies.
-            Compound instances matching this (these) name(s) will be provided
-            with unique rigid_ids
-        rigid_particles : str or list of str, optional, default=None
-            Name(s) of Compound instances at the bottom of the containment
-            hierarchy (Particles) to be included in rigid bodies. Only Particles
-            matching this (these) name(s) will have their rigid_ids altered to
-            match the rigid body number.
-
-        Examples
-        --------
-        Creating a rigid benzene
-
-        >>> import mbuild as mb
-        >>> from mbuild.utils.io import get_fn
-        >>> benzene = mb.load(get_fn('benzene.mol2'))
-        >>> benzene.label_rigid_bodies()
-
-        Creating a semi-rigid benzene, where only the carbons are treated as
-        a rigid body
-
-        >>> import mbuild as mb
-        >>> from mbuild.utils.io import get_fn
-        >>> benzene = mb.load(get_fn('benzene.mol2'))
-        >>> benzene.label_rigid_bodies(rigid_particles='C')
-
-        Create a box of rigid benzenes, where each benzene has a unique rigid
-        body ID.
-
-        >>> import mbuild as mb
-        >>> from mbuild.utils.io import get_fn
-        >>> benzene = mb.load(get_fn('benzene.mol2'))
-        >>> benzene.name = 'Benzene'
-        >>> filled = mb.fill_box(benzene,
-        ...                      n_compounds=10,
-        ...                      box=[0, 0, 0, 4, 4, 4])
-        >>> filled.label_rigid_bodies(distinct_bodies='Benzene')
-
-        Create a box of semi-rigid benzenes, where each benzene has a unique
-        rigid body ID and only the carbon portion is treated as rigid.
-
-        >>> import mbuild as mb
-        >>> from mbuild.utils.io import get_fn
-        >>> benzene = mb.load(get_fn('benzene.mol2'))
-        >>> benzene.name = 'Benzene'
-        >>> filled = mb.fill_box(benzene,
-        ...                      n_compounds=10,
-        ...                      box=[0, 0, 0, 4, 4, 4])
-        >>> filled.label_rigid_bodies(distinct_bodies='Benzene',
-        ...                           rigid_particles='C')
-        """
-        if discrete_bodies is not None:
-            if isinstance(discrete_bodies, str):
-                discrete_bodies = [discrete_bodies]
-        if rigid_particles is not None:
-            if isinstance(rigid_particles, str):
-                rigid_particles = [rigid_particles]
-
-        if self.root.max_rigid_id is not None:
-            rigid_id = self.root.max_rigid_id + 1
-            warn(
-                f"{rigid_id} rigid bodies already exist.  Incrementing 'rigid_id'"
-                f"starting from {rigid_id}."
-            )
-        else:
-            rigid_id = 0
-
-        for successor in self.successors():
-            if discrete_bodies and successor.name not in discrete_bodies:
-                continue
-            for particle in successor.particles():
-                if rigid_particles and particle.name not in rigid_particles:
-                    continue
-                particle.rigid_id = rigid_id
-            if discrete_bodies:
-                rigid_id += 1
-
-    def unlabel_rigid_bodies(self):
-        """Remove all rigid body labels from the Compound."""
-        self._check_if_contains_rigid_bodies = True
-        for child in self.children:
-            child._check_if_contains_rigid_bodies = True
-        for particle in self.particles():
-            particle.rigid_id = None
-
-    def _increment_rigid_ids(self, increment):
-        """Increment the rigid_id of all rigid Particles in a Compound.
-
-        Adds `increment` to the rigid_id of all Particles in `self` that
-        already have an integer rigid_id.
-        """
-        for particle in self.particles():
-            if particle.rigid_id is not None:
-                particle.rigid_id += increment
-
-    def _reorder_rigid_ids(self):
-        """Reorder rigid body IDs ensuring consecutiveness.
-
-        Primarily used internally to ensure consecutive rigid_ids following
-        removal of a Compound.
-        """
-        max_rigid = self.max_rigid_id
-        unique_rigid_ids = sorted(
-            set([p.rigid_id for p in self.rigid_particles()])
-        )
-        n_unique_rigid = len(unique_rigid_ids)
-        if max_rigid and n_unique_rigid != max_rigid + 1:
-            missing_rigid_id = (
-                unique_rigid_ids[-1] * (unique_rigid_ids[-1] + 1)
-            ) / 2 - sum(unique_rigid_ids)
-            for successor in self.successors():
-                if successor.rigid_id is not None:
-                    if successor.rigid_id > missing_rigid_id:
-                        successor.rigid_id -= 1
-            if self.rigid_id:
-                if self.rigid_id > missing_rigid_id:
-                    self.rigid_id -= 1
-
     def set_reactive(self, reaction_type):
         """"""
         from mbuild.port import Port
@@ -836,7 +595,7 @@ class Compound(object):
             )
         self._reactive = True
         self.reaction_type = reaction_type
-        h_bonds = [] 
+        h_bonds = []
         for p in self.direct_bonds():
             if p.element.atomic_number == 1:
                 p._reactive = True
@@ -844,11 +603,7 @@ class Compound(object):
                 h_bonds.append(p.xyz[0] - self.xyz[0])
         # Make port
         orientation = np.mean(h_bonds, axis=0)
-        port = Port(
-                anchor=self,
-                separation=0.10,
-                orientation=orientation
-        )
+        port = Port(anchor=self, separation=0.10, orientation=orientation)
         self.parent.add(port)
 
     def add(
@@ -859,7 +614,6 @@ class Compound(object):
         replace=False,
         inherit_periodicity=None,
         inherit_box=False,
-        reset_rigid_ids=True,
         check_box_size=True,
     ):
         """Add a part to the Compound.
@@ -884,11 +638,6 @@ class Compound(object):
             Compound being added
         inherit_box: bool, optional, default=False
             Replace the box of self with the box of the Compound being added
-        reset_rigid_ids : bool, optional, default=True
-            If the Compound to be added contains rigid bodies, reset the
-            rigid_ids such that values remain distinct from rigid_ids
-            already present in `self`. Can be set to False if attempting
-            to add Compounds to an existing rigid body.
         check_box_size : bool, optional, default=True
             Checks and warns if compound box is smaller than its bounding box after adding new_child.
         """
@@ -938,15 +687,10 @@ class Compound(object):
                     self.add(
                         child,
                         label=label_list[i],
-                        reset_rigid_ids=reset_rigid_ids,
                         check_box_size=False,
                     )
                 else:
-                    self.add(
-                        child,
-                        reset_rigid_ids=reset_rigid_ids,
-                        check_box_size=False,
-                    )
+                    self.add(child, check_box_size=False)
 
             return
 
@@ -962,13 +706,6 @@ class Compound(object):
                 "compounds."
             )
             self._mass = 0
-
-        if new_child.contains_rigid or new_child.rigid_id is not None:
-            if self.contains_rigid and reset_rigid_ids:
-                new_child._increment_rigid_ids(increment=self.max_rigid_id + 1)
-            self._check_if_contains_rigid_bodies = True
-        if self.rigid_id is not None:
-            self.rigid_id = None
 
         # Create children and labels on the first add operation
         if self.children is None:
@@ -1002,12 +739,13 @@ class Compound(object):
 
         if label.endswith("[$]"):
             label = label[:-3]
-            if label not in self.labels:
-                self.labels[label] = []
+            all_label = "all-" + label + "s"
+            if all_label not in self.labels:
+                self.labels[all_label] = []
             label_pattern = label + "[{}]"
 
-            count = len(self.labels[label])
-            self.labels[label].append(new_child)
+            count = len(self.labels[all_label])
+            self.labels[all_label].append(new_child)
             label = label_pattern.format(count)
 
         if not replace and label in self.labels:
@@ -1048,8 +786,7 @@ class Compound(object):
         # Check that bounding box is within box after adding compound
         if self.box and check_box_size:
             if (
-                np.array(self.box.lengths)
-                < np.array(self.get_boundingbox().lengths)
+                np.array(self.box.lengths) < np.array(self.get_boundingbox().lengths)
             ).any():
                 warn(
                     "After adding new Compound, Compound.box.lengths < "
@@ -1111,7 +848,7 @@ class Compound(object):
         for particle in particles_to_remove:
             _check_if_empty(particle)
 
-        # Fix rigid_ids and remove obj from bondgraph
+        # Remove obj from bondgraph
         for removed_part in to_remove:
             self._remove(removed_part)
 
@@ -1121,11 +858,6 @@ class Compound(object):
                 removed_part.parent.children.remove(removed_part)
             self._remove_references(removed_part)
 
-        # Check and reorder rigid id
-        for _ in particles_to_remove:
-            if self.contains_rigid:
-                self.root._reorder_rigid_ids()
-
         # Remove ghost ports
         self._prune_ghost_ports()
 
@@ -1134,7 +866,21 @@ class Compound(object):
             self.reset_labels()
 
     def reset_labels(self):
-        """Reset Compound labels so that substituents and ports are renumbered, indexed from port[0] to port[N], where N-1 is the number of ports."""
+        """Reset Compound labels so that substituents and ports are renumbered, indexed from port[0] to port[N], where N-1 is the number of ports.
+
+        Notes
+        -----
+        Will renumber the labels in a given Compound. Duplicated labels are named in the format "{name}[$]", where the $ stands in for the 0-indexed
+        number in the Compound hierarchy with given "name".
+
+        i.e. self.labels.keys() = ["CH2", "CH2", "CH2"] would transform into self.labels.keys() = ["CH2[0]", "CH2[1]", "CH2[2]"]
+        and
+        i.e. self.labels.keys() = ["CH2[1]", "CH2[3]", "CH2[5]"] would transform into self.labels.keys() = ["CH2[0]", "CH2[1]", "CH2[2]"]
+
+        Additonally, if it doesn't exist, duplicated labels that are numbered as above with the "[$]" will also be put into a list index.
+        self.labels.keys() = ["CH2", "CH2", "CH2"] would transform into self.labels.keys() = ["CH2[0]", "CH2[1]", "CH2[2]"] as shown above, but also
+        have a label of self.labels["all-CH2s"], which is a list of all CH2 children in the Compound.
+        """
         new_labels = OrderedDict()
         hoisted_children = {
             key: val
@@ -1160,23 +906,21 @@ class Compound(object):
             if label is None:
                 if "Port" in child.name:
                     label = [
-                        key
-                        for key, x in self.labels.items()
-                        if id(x) == id(child)
+                        key for key, x in self.labels.items() if id(x) == id(child)
                     ][0]
                     if "port" in label:
                         label = "port[$]"
                 else:
-                    label = "{0}[$]".format(child.name)
-
+                    label = f"{child.name}[$]"
             if label.endswith("[$]"):
                 label = label[:-3]
-                if label not in new_labels:
-                    new_labels[label] = []
+                all_label = "all-" + label + "s"
+                if all_label not in new_labels:
+                    new_labels[all_label] = []
                 label_pattern = label + "[{}]"
 
-                count = len(new_labels[label])
-                new_labels[label].append(child)
+                count = len(new_labels[all_label])
+                new_labels[all_label].append(child)
                 label = label_pattern.format(count)
             new_labels[label] = child
         self.labels = new_labels
@@ -1192,14 +936,9 @@ class Compound(object):
                 self._remove_references(port)
 
     def _remove(self, removed_part):
-        """Worker for remove(). Fixes rigid IDs and removes bonds."""
-        if removed_part.rigid_id is not None:
-            for ancestor in removed_part.ancestors():
-                ancestor._check_if_contains_rigid_bodies = True
+        """Worker for remove(). Removes bonds."""
         if self.root.bond_graph.has_node(removed_part):
-            for neighbor in nx.neighbors(
-                self.root.bond_graph.copy(), removed_part
-            ):
+            for neighbor in nx.neighbors(self.root.bond_graph.copy(), removed_part):
                 self.root.remove_bond((removed_part, neighbor))
             self.root.bond_graph.remove_node(removed_part)
 
@@ -1268,11 +1007,7 @@ class Compound(object):
         """
         from mbuild.port import Port
 
-        return [
-            p
-            for p in self.labels.values()
-            if isinstance(p, Port) and not p.used
-        ]
+        return [p for p in self.labels.values() if isinstance(p, Port) and not p.used]
 
     def direct_bonds(self):
         """Return a list of particles that this particle bonds to.
@@ -1386,8 +1121,7 @@ class Compound(object):
                 "unspecified",
             ]:
                 raise ValueError(
-                    "Invalid bond_order given. Available bond orders are: "
-                    "single",
+                    "Invalid bond_order given. Available bond orders are: single",
                     "double",
                     "triple",
                     "aromatic",
@@ -1413,9 +1147,7 @@ class Compound(object):
         """
         if self.box is None:
             self.box = self.get_boundingbox()
-        particle_kdtree = PeriodicKDTree.from_compound(
-            compound=self, leafsize=10
-        )
+        particle_kdtree = PeriodicKDTree.from_compound(compound=self, leafsize=10)
         particle_array = np.array(list(self.particles()))
         added_bonds = list()
         for p1 in self.particles_by_name(name_a):
@@ -1468,9 +1200,7 @@ class Compound(object):
             box = self.get_boundingbox()
         else:
             box = self.box
-        moved_positions = self.xyz - np.array(
-            [box.Lx / 2, box.Ly / 2, box.Lz / 2]
-        )
+        moved_positions = self.xyz - np.array([box.Lx / 2, box.Ly / 2, box.Lz / 2])
 
         # quadruple box lengths for non-periodic dimensions
         # since freud boxes are centered at the origin, extend box
@@ -1481,16 +1211,14 @@ class Compound(object):
             freud_box = freud.box.Box.from_matrix(box.vectors.T)
         # not periodic in some dimensions, lets make them pseudo-periodic
         else:
-            tmp_lengths = [l for l in box.lengths]
+            tmp_lengths = [length for length in box.lengths]
             max_tmp_length = max(tmp_lengths)
             for i, is_periodic in enumerate(self.periodicity):
                 if is_periodic:
                     continue
                 else:
                     tmp_lengths[i] = tmp_lengths[i] + 4 * max_tmp_length
-            tmp_box = Box.from_lengths_angles(
-                lengths=tmp_lengths, angles=box.angles
-            )
+            tmp_box = Box.from_lengths_angles(lengths=tmp_lengths, angles=box.angles)
             freud_box = freud.box.Box.from_matrix(tmp_box.vectors.T)
 
         freud_box.periodic = (True, True, True)
@@ -1551,8 +1279,9 @@ class Compound(object):
         bond_vector = particle_pair[0].pos - particle_pair[1].pos
         if np.allclose(bond_vector, np.zeros(3)):
             warn(
-                "Particles {} and {} overlap! Ports will not be added."
-                "".format(*particle_pair)
+                "Particles {} and {} overlap! Ports will not be added.".format(
+                    *particle_pair
+                )
             )
             return
         distance = np.linalg.norm(bond_vector)
@@ -1619,7 +1348,7 @@ class Compound(object):
 
     @box.setter
     def box(self, box):
-        if box is not None and type(box) != Box:
+        if box and not isinstance(box, Box):
             raise TypeError("box must be specified as an mbuild.Box")
         if self.port_particle and box is not None:
             raise ValueError("Ports cannot have a box")
@@ -1707,9 +1436,7 @@ class Compound(object):
                 )
             self.pos = np.squeeze(arrnx3)
         else:
-            for atom, coords in zip(
-                self._particles(include_ports=False), arrnx3
-            ):
+            for atom, coords in zip(self._particles(include_ports=False), arrnx3):
                 atom.pos = coords
 
     @xyz_with_ports.setter
@@ -1729,9 +1456,7 @@ class Compound(object):
                 )
             self.pos = np.squeeze(arrnx3)
         else:
-            for atom, coords in zip(
-                self._particles(include_ports=True), arrnx3
-            ):
+            for atom, coords in zip(self._particles(include_ports=True), arrnx3):
                 atom.pos = coords
 
     @property
@@ -1855,9 +1580,7 @@ class Compound(object):
             for dim, val in enumerate(padding):
                 vecs[dim][dim] = vecs[dim][dim] + val
 
-        bounding_box = Box.from_vectors(
-            vectors=np.asarray([vecs]).reshape(3, 3)
-        )
+        bounding_box = Box.from_vectors(vectors=np.asarray([vecs]).reshape(3, 3))
         return bounding_box
 
     def min_periodic_distance(self, xyz0, xyz1):
@@ -1896,9 +1619,7 @@ class Compound(object):
             raise MBuildError(f'Cannot calculate minimum periodic distance. '
                               f'No Box set for {self}')
             """
-            warn(
-                f"No Box object set for {self}, using rectangular bounding box"
-            )
+            warn(f"No Box object set for {self}, using rectangular bounding box")
             self.box = self.get_boundingbox()
             if np.allclose(self.box.angles, 90.0):
                 d = np.where(
@@ -2006,9 +1727,7 @@ class Compound(object):
                 )
 
         else:
-            raise RuntimeError(
-                "Visualization is only supported in Jupyter Notebooks."
-            )
+            raise RuntimeError("Visualization is only supported in Jupyter Notebooks.")
 
     def _visualize_py3dmol(
         self,
@@ -2067,7 +1786,6 @@ class Compound(object):
             os.path.join(tmp_dir, "tmp.mol2"),
             include_ports=show_ports,
             overwrite=True,
-            parmed_kwargs={"infer_residues": False},
         )
 
         view = py3Dmol.view()
@@ -2087,9 +1805,7 @@ class Compound(object):
 
         return view
 
-    def _visualize_nglview(
-        self, show_ports=False, color_scheme={}, bead_size=0.3
-    ):
+    def _visualize_nglview(self, show_ports=False, color_scheme={}, bead_size=0.3):
         """Visualize the Compound using nglview.
 
         Allows for visualization of a Compound within a Jupyter Notebook.
@@ -2100,7 +1816,7 @@ class Compound(object):
             Visualize Ports in addition to Particles
         """
         nglview = import_("nglview")
-        mdtraj = import_("mdtraj")
+        mdtraj = import_("mdtraj")  # noqa: F841
         from mdtraj.geometry.sasa import _ATOMIC_RADII
 
         def remove_digits(x):
@@ -2180,9 +1896,7 @@ class Compound(object):
                     # ancestor of the first particle is used as reference.
                     # Hence, this called will return the lowest-level Compound
                     # that is a molecule
-                    ancestors = ancestors.intersection(
-                        IndexedSet(particle.ancestors())
-                    )
+                    ancestors = ancestors.intersection(IndexedSet(particle.ancestors()))
 
                 """Parse molecule information"""
                 molecule_tag = ancestors[0]
@@ -2239,6 +1953,9 @@ class Compound(object):
             for neighbor in nx.neighbors(bond_graph, particle):
                 new_bonds.append((particle, neighbor))
 
+        # Remove all labels which refer to children in the hierarchy
+        self.labels.clear()
+
         # Remove all the children
         if inplace:
             for child in children_list:
@@ -2255,6 +1972,7 @@ class Compound(object):
             comp = clone(self)
             comp.flatten(inplace=True)
             return comp
+        self.reset_labels()
 
     def update_coordinates(self, filename, update_port_locations=True):
         """Update the coordinates of this Compound from a file.
@@ -2499,12 +2217,11 @@ class Compound(object):
                     anchor_in_compound = True
                     anchor_pos_old = anchor.pos
 
-            if anchor_in_compound == False:
+            if not anchor_in_compound:
                 raise MBuildError(
                     f"Anchor: {anchor} is not part of the Compound: {self}"
                     "that you are trying to energy minimize."
                 )
-        original = clone(self)
         self._kick()
         extension = os.path.splitext(forcefield)[-1]
         openbabel_ffs = ["MMFF94", "MMFF94s", "UFF", "GAFF", "Ghemical"]
@@ -2538,7 +2255,7 @@ class Compound(object):
         if shift_com:
             self.translate_to(com)
 
-        if anchor_in_compound == True:
+        if anchor_in_compound:
             anchor_pos_new = anchor.pos
             delta = anchor_pos_old - anchor_pos_new
             self.translate(delta)
@@ -2594,9 +2311,7 @@ class Compound(object):
         foyer = import_("foyer")
 
         to_parmed = self.to_parmed()
-        ff = foyer.Forcefield(
-            forcefield_files=forcefield_files, name=forcefield_name
-        )
+        ff = foyer.Forcefield(forcefield_files=forcefield_files, name=forcefield_name)
         to_parmed = ff.apply(to_parmed)
 
         import openmm.unit as u
@@ -2641,9 +2356,7 @@ class Compound(object):
 
             elif type(force).__name__ == "HarmonicAngleForce":
                 for angle_index in range(force.getNumAngles()):
-                    atom1, atom2, atom3, r0, k = force.getAngleParameters(
-                        angle_index
-                    )
+                    atom1, atom2, atom3, r0, k = force.getAngleParameters(angle_index)
                     force.setAngleParameters(
                         angle_index, atom1, atom2, atom3, r0, k * scale_angles
                     )
@@ -2680,9 +2393,7 @@ class Compound(object):
 
             elif type(force).__name__ == "NonbondedForce":
                 for nb_index in range(force.getNumParticles()):
-                    charge, sigma, epsilon = force.getParticleParameters(
-                        nb_index
-                    )
+                    charge, sigma, epsilon = force.getParticleParameters(nb_index)
                     force.setParticleParameters(
                         nb_index, charge, sigma, epsilon * scale_nonbonded
                     )
@@ -2702,9 +2413,7 @@ class Compound(object):
         # Run energy minimization through OpenMM
         simulation.minimizeEnergy(maxIterations=steps)
         reporter = PDBReporter(os.path.join(tmp_dir, "minimized.pdb"), 1)
-        reporter.report(
-            simulation, simulation.context.getState(getPositions=True)
-        )
+        reporter.report(simulation, simulation.context.getState(getPositions=True))
 
     def _check_openbabel_constraints(
         self,
@@ -2926,18 +2635,16 @@ class Compound(object):
                 self._check_openbabel_constraints([p1], successors_list)
 
                 if len(p1.children) == 0:
-                    pid = (
-                        particle_idx[id(p1)] + 1
-                    )  # openbabel indices start at 1
+                    pid = particle_idx[id(p1)] + 1  # openbabel indices start at 1
 
-                    if all_true == True:
+                    if all_true:
                         ob_constraints.AddAtomConstraint(pid)
                     else:
-                        if dims[0] == True:
+                        if dims[0]:
                             ob_constraints.AddAtomXConstraint(pid)
-                        if dims[1] == True:
+                        if dims[1]:
                             ob_constraints.AddAtomYConstraint(pid)
-                        if dims[2] == True:
+                        if dims[2]:
                             ob_constraints.AddAtomZConstraint(pid)
                 else:
                     for particle in p1.particles():
@@ -2945,14 +2652,14 @@ class Compound(object):
                             particle_idx[id(particle)] + 1
                         )  # openbabel indices start at 1
 
-                        if all_true == True:
+                        if all_true:
                             ob_constraints.AddAtomConstraint(pid)
                         else:
-                            if dims[0] == True:
+                            if dims[0]:
                                 ob_constraints.AddAtomXConstraint(pid)
-                            if dims[1] == True:
+                            if dims[1]:
                                 ob_constraints.AddAtomYConstraint(pid)
-                            if dims[2] == True:
+                            if dims[2]:
                                 ob_constraints.AddAtomZConstraint(pid)
 
         if ignore_compounds is not None:
@@ -2967,9 +2674,7 @@ class Compound(object):
             for ignore in ignore_compounds:
                 p1 = ignore
                 if len(p1.children) == 0:
-                    pid = (
-                        particle_idx[id(p1)] + 1
-                    )  # openbabel indices start at 1
+                    pid = particle_idx[id(p1)] + 1  # openbabel indices start at 1
                     ob_constraints.AddIgnore(pid)
 
                 else:
@@ -3039,15 +2744,9 @@ class Compound(object):
         self,
         filename,
         include_ports=False,
-        forcefield_name=None,
-        forcefield_files=None,
-        forcefield_debug=False,
         box=None,
         overwrite=False,
         residues=None,
-        combining_rule="lorentz",
-        foyer_kwargs=None,
-        parmed_kwargs=None,
         **kwargs,
     ):
         """Save the Compound to a file.
@@ -3057,22 +2756,11 @@ class Compound(object):
         filename : str
             Filesystem path in which to save the trajectory. The extension or
             prefix will be parsed and control the format. Supported extensions:
-            'hoomdxml', 'gsd', 'gro', 'top', 'lammps', 'lmp', 'mcf', 'pdb', 'xyz',
-            'json', 'mol2', 'sdf', 'psf'. See parmed/structure.py for more
-            information on savers.
+            'gsd', 'gro', 'top', 'mcf', 'pdb', 'xyz',
+            'json', 'mol2', 'sdf', 'psf'. See `mbuild.conversion.save()`
+            for more information about writer methods.
         include_ports : bool, optional, default=False
             Save ports contained within the compound.
-        forcefield_files : str, optional, default=None
-            Apply a forcefield to the output file using a forcefield provided
-            by the `foyer` package.
-        forcefield_name : str, optional, default=None
-            Apply a named forcefield to the output file using the `foyer`
-            package, e.g. 'oplsaa'. `Foyer forcefields
-            <https://github.com/mosdef-hub/foyer/tree/master/foyer/forcefields>`_
-        forcefield_debug : bool, optional, default=False
-            Choose verbosity level when applying a forcefield through `foyer`.
-            Specifically, when missing atom types in the forcefield xml file,
-            determine if the warning is condensed or verbose.
         box : mb.Box, optional, default=self.boundingbox (with buffer)
             Box information to be written to the output file. If 'None', a
             bounding box is used with 0.25nm buffers at each face to avoid
@@ -3082,50 +2770,25 @@ class Compound(object):
         residues : str of list of str
             Labels of residues in the Compound. Residues are assigned by
             checking against Compound.name.
-        combining_rule : str, optional, default='lorentz'
-            Specify the combining rule for nonbonded interactions. Only relevant
-            when the `foyer` package is used to apply a forcefield. Valid
-            options are 'lorentz' and 'geometric', specifying Lorentz-Berthelot
-            and geometric combining rules respectively.
-        foyer_kwargs : dict, optional, default=None
-            Keyword arguments to provide to `foyer.Forcefield.apply`.
-            Depending on the file extension these will be passed to either
-            `write_gsd`, `write_hoomdxml`, `write_lammpsdata`,
-            `write_mcf`, or `parmed.Structure.save`.
-            See `parmed structure documentation
-            <https://parmed.github.io/ParmEd/html/structobj/parmed.structure.Structure.html#parmed.structure.Structure.save>`_
-        parmed_kwargs : dict, optional, default=None
-            Keyword arguments to provide to :meth:`mbuild.Compound.to_parmed`
         **kwargs
+            See `mbuild.conversion.save()`.
             Depending on the file extension these will be passed to either
-            `write_gsd`, `write_hoomdxml`, `write_lammpsdata`, `write_mcf`, or
-            `parmed.Structure.save`.
+            Parmed or GMSO backend writers
             See https://parmed.github.io/ParmEd/html/structobj/parmed.structure.
-            Structure.html#parmed.structure.Structure.save
+            Structure.html#parmed.structure.Structure.save and
+            https://github.com/mosdef-hub/gmso/tree/main/gmso/formats
 
         Other Parameters
         ----------------
         ref_distance : float, optional, default=1.0
-            Normalization factor used when saving to .gsd and .hoomdxml formats
+            Normalization factor used when saving to the .gsd format
             for converting distance values to reduced units.
         ref_energy : float, optional, default=1.0
-            Normalization factor used when saving to .gsd and .hoomdxml formats
+            Normalization factor used when saving to the .gsd format
             for converting energy values to reduced units.
         ref_mass : float, optional, default=1.0
-            Normalization factor used when saving to .gsd and .hoomdxml formats
+            Normalization factor used when saving to the .gsd format
             for converting mass values to reduced units.
-        atom_style: str, default='full'
-            Defines the style of atoms to be saved in a LAMMPS data file. The
-            following atom styles are currently supported:
-            'full', 'atomic', 'charge', 'molecular'
-            See `LAMMPS atom style documentation
-            <https://lammps.sandia.gov/doc/atom_style.html>`_ for more
-            information.
-        unit_style: str, default='real'
-            Defines to unit style to be save in a LAMMPS data file.  Defaults
-            to 'real' units. Current styles are supported: 'real', 'lj'. See
-            `LAMMPS unit style documentation_
-            <https://lammps.sandia.gov/doc/units.html>`_ for more information.
 
         Notes
         -----
@@ -3134,29 +2797,24 @@ class Compound(object):
         * filename
         * include_ports
 
+        The savers used for each supported file type are:
+        GMSO: .gro, .gsd, .data, .xyz, .mcf, .top
+        Parmed: .mol2, .pdb, .prmtop, .cif, .crd
+        PyBel: .sdf
+
         See Also
         --------
-        conversion.save : Main saver logic
-        formats.gsdwrite.write_gsd : Write to GSD format
-        formats.hoomdxml.write_hoomdxml : Write to Hoomd XML format
-        formats.xyzwriter.write_xyz : Write to XYZ format
-        formats.lammpsdata.write_lammpsdata : Write to LAMMPS data format
-        formats.cassandramcf.write_mcf : Write to Cassandra MCF format
-        formats.json_formats.compound_to_json : Write to a json file
+        mbuild.conversion.save : Main saver logic
+        mbuild.formats.cassandramcf.write_mcf : Write to Cassandra MCF format
+        mbuild.formats.json_formats.compound_to_json : Write to a json file
         """
         conversion.save(
-            self,
-            filename,
-            include_ports,
-            forcefield_name,
-            forcefield_files,
-            forcefield_debug,
-            box,
-            overwrite,
-            residues,
-            combining_rule,
-            foyer_kwargs,
-            parmed_kwargs,
+            compound=self,
+            filename=filename,
+            include_ports=include_ports,
+            box=box,
+            overwrite=overwrite,
+            residues=residues,
             **kwargs,
         )
 
@@ -3306,11 +2964,24 @@ class Compound(object):
         """
         return conversion.to_gmso(self, **kwargs)
 
+    def to_hoomdsnapshot(self, **kwargs):
+        """Create a HOOMD-Blue snapshot from an mBuild Compound.
+
+        Parameters
+        ----------
+        compound : mb.Compound
+            The mb.Compound to be converted.
+
+        Returns
+        -------
+        snapshot : gsd.hoomd.Frame
+            HOOMD-Blue compatible topology.
+        """
+        return conversion.to_hoomdsnapshot(self, **kwargs)
+
     # Interface to Trajectory for reading/writing .pdb and .mol2 files.
     # -----------------------------------------------------------------
-    def from_trajectory(
-        self, traj, frame=-1, coords_only=False, infer_hierarchy=True
-    ):
+    def from_trajectory(self, traj, frame=-1, coords_only=False, infer_hierarchy=True):
         """Extract atoms and bonds from a md.Trajectory.
 
         Will create sub-compounds for every chain if there is more than one
@@ -3339,9 +3010,7 @@ class Compound(object):
             infer_hierarchy=True,
         )
 
-    def to_trajectory(
-        self, include_ports=False, chains=None, residues=None, box=None
-    ):
+    def to_trajectory(self, include_ports=False, chains=None, residues=None, box=None):
         """Convert to an md.Trajectory and flatten the compound.
 
         Parameters
@@ -3617,9 +3286,7 @@ class Compound(object):
         --------
         mbuild.conversion.to_intermol
         """
-        return conversion.to_intermol(
-            compound=self, molecule_types=molecule_types
-        )
+        return conversion.to_intermol(compound=self, molecule_types=molecule_types)
 
     def get_smiles(self):
         """Get SMILES string for compound.
@@ -3693,12 +3360,7 @@ class Compound(object):
         newone._pos = deepcopy(self._pos)
         newone.port_particle = deepcopy(self.port_particle)
         newone._box = deepcopy(self._box)
-        newone._check_if_contains_rigid_bodies = deepcopy(
-            self._check_if_contains_rigid_bodies
-        )
         newone._periodicity = deepcopy(self._periodicity)
-        newone._contains_rigid = deepcopy(self._contains_rigid)
-        newone._rigid_id = deepcopy(self._rigid_id)
         newone._charge = deepcopy(self._charge)
         newone._mass = deepcopy(self._mass)
         if hasattr(self, "index"):
@@ -3725,9 +3387,7 @@ class Compound(object):
         if self.labels:
             for label, compound in self.labels.items():
                 if not isinstance(compound, list):
-                    newone.labels[label] = compound._clone(
-                        clone_of, root_container
-                    )
+                    newone.labels[label] = compound._clone(clone_of, root_container)
                     compound.referrers.add(clone_of[compound])
                 else:
                     # compound is a list of compounds, so we create an empty
