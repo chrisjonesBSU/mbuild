@@ -1,6 +1,8 @@
 mBuild
 =======
 
+.. image:: https://img.shields.io/github/v/release/mosdef-hub/mbuild
+   :alt: GitHub Release
 .. image:: https://img.shields.io/badge/license-MIT-blue.svg
     :target: http://opensource.org/licenses/MIT
 
@@ -35,17 +37,17 @@ allowing large-scale screening of chemicals and materials using
 
 The `MoSDeF <https://mosdef.org>`_ software is comprised the following packages:
     * `mBuild <https://mbuild.mosdef.org/en/stable/>`_ -- A hierarchical, component based molecule builder
-    * `foyer <https://foyer.mosdef.org/en/stable/>`_ -- A package for atom-typing as well as applying and disseminating forcefields
     * `GMSO <https://gmso.mosdef.org/en/stable/>`_ -- Flexible storage of chemical topology for molecular simulation
+    * `foyer <https://foyer.mosdef.org/en/stable/>`_ -- A package for atom-typing as well as applying and disseminating forcefields
 
 
 .. toctree::
 	:caption: Getting Started
     	:maxdepth: 2
 
-	getting_started/example_system
 	getting_started/installation/installation_toc
-    	getting_started/quick_start/quick_start
+	getting_started/example_system
+  getting_started/quick_start/quick_start
 	getting_started/writers/writers
 	getting_started/tutorials/tutorials
 

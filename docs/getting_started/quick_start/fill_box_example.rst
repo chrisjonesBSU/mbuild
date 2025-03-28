@@ -19,7 +19,7 @@ Import the required mbuild package.
 
 Construct an all-atom (AA) hexane and ethanol using the OPLS-AA force field (FF),
 which is shipped as a standard `foyer <https://foyer.mosdef.org/en/stable/>`_ FF.
-The hexane and ethanol molecules will be created using `smiles strings <https://www.daylight.com/dayhtml/doc/theory/theory.smiles.html>`_.
+The hexane and ethanol molecules will be created using `SMILES strings <https://www.daylight.com/dayhtml/doc/theory/theory.smiles.html>`_.
 The hexane and ethanol residues will be named `"HEX"` and `"ETO"`, respectively.
 Lastly, the hexane and ethanol molecule's configuration will be energy minimized, properly reorienting the molecule to the specified FF, which is sometimes needed for some simulation engines to ensure the initial configuration energy is not too high.
 
@@ -81,7 +81,6 @@ The orthogonal liquid box contains 1230 methane molecules and measures 4.5 nm in
 
 .. code:: ipython3
 
-    box_liq = mb.fill_box(compound=methane,
-                          n_compounds=1230,
-                          box=[4.5, 4.5, 4.5]
-                          )
+    box_liq = mb.fill_box(
+        compound=methane, n_compounds=1230, box=[4.5, 4.5, 4.5]
+    )

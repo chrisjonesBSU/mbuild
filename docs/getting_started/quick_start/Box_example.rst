@@ -1,6 +1,9 @@
 Box
 ========================
 
+A simulation volume, or box, is its own class in mBuild. Setting the box for an mBuild Compound ensures the simulation volume information
+is correctly written out to simulation input files.
+
 
 Import the required mbuild package.
 

@@ -2,7 +2,7 @@
 Installation
 ============
 
-Install with `conda <https://repo.anaconda.com/miniconda/>`_
+Install with `conda <https://conda-forge.org/download/>`_
 -----------------------------------------------------------------
 ::
 
@@ -30,9 +30,10 @@ after which you can simply install without specifying the channels::
 
 Install an editable version from source
 ---------------------------------------
+In order to contribute to mBuild through pull requests, we recommend installing mBuild from source.
 
 To make your life easier, we recommend that you use a pre-packaged Python
-distribution like `Miniconda <https://docs.conda.io/en/latest/miniconda.html>`_
+distribution like `Miniforge <https://conda-forge.org/download/>`_
 in order to get all of the dependencies::
 
     $ git clone https://github.com/mosdef-hub/mbuild
@@ -41,14 +42,10 @@ in order to get all of the dependencies::
     $ conda activate mbuild-dev
     $ pip install -e .
 
-.. note::
-    The above installation is for OSX and Unix. If you are using Windows, use environment-win.yml instead of environment-dev.yml
-
-
 Install pre-commit
 ------------------
 
-We use `pre-commit <https://pre-commit.com/>`_ to automatically handle our code formatting and this package is included in the dev environment.
+mBuild uses `pre-commit <https://pre-commit.com/>`_ to automatically handle code formatting and pre-commit is included in the dev environment.
 With the ``mbuild-dev`` conda environment active, pre-commit can be installed locally as a git hook by running::
 
      $ pre-commit install
@@ -61,18 +58,18 @@ And (optional) all files can be checked by running::
 Supported Python Versions
 -------------------------
 
-Python 3.9, 3.10 and 3.11 are officially supported, including testing during
+Python 3.9, 3.10, 3.11, and 3.12 are officially supported, including testing during
 development and packaging. Support for Python 2.7 has been dropped as of
-August 6, 2019. Other Python versions, such as 3.12 and 3.8 and older, may
+August 6, 2019. Other Python versions, such as 3.13 and 3.8 and older, may
 successfully build and function but no guarantee is made.
 
 Testing your installation
 -------------------------
 
-mBuild uses `py.test <https://docs.pytest.org/en/stable/>`_ for unit testing. To run them simply run the following while in the base directory::
+mBuild uses `py.test <https://docs.pytest.org/en/stable/>`_ for unit testing. To run tests, simply run the following while in the base directory::
 
     $ conda install pytest
-    $ py.test -v
+    $ pytest -v
 
 Building the documentation
 --------------------------

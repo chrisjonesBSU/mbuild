@@ -46,7 +46,22 @@ The `CIF <https://www.iucr.org/resources/cif>`_ file is loaded using the ``load_
     ETV_triclinic = lattice_cif_ETV_triclinic.populate(x=3, y=3, z=3)
     ETV_triclinic.name = 'ETV'
 
+Loading from a SMILES string
+----------------------------
+
+Create an ``mbuild.Compound`` (i.e., the "benzene" variable) by loading from a `SMILES <https://www.daylight.com/dayhtml/doc/theory/theory.smiles.html>`_ string.
+
+
+Import the required mbuild packages.
+
+.. code:: ipython3
+
+    import mbuild as mb
+
+.. code:: ipython3
+   benzene = mb.load("c1ccccc1", smiles=True)
+   benzene.name = "Benzene"
 
 Other file types
 ------------------------
-mBuild also supports :ref:`loading_data` or files via hoomd_snapshot, GSD, SMILES strings, and ParmEd structures.
+mBuild also supports :ref:`loading_data` or files via .gsd, .xyz, .pdb files, and ParmEd structures.

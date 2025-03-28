@@ -34,6 +34,7 @@ Box
 .. autoclass:: mbuild.Box
 	:members:
 
+
 Lattice
 -------
 
