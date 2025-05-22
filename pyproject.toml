@@ -37,8 +37,10 @@ zip-safe = false
 include-package-data = true
 license-files = ["LICENSE"]
 
-[tool.setuptools.packages]
-find = {namespaces = false}
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mbuild*"]
+exclude = ["mbuild.tests*"]
 
 [tool.setuptools.package-data]
 mbuild = ['"utils/**"', '"lib/**"']
