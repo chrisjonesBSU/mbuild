@@ -2,6 +2,8 @@
 
 import math
 from abc import abstractmethod
+import os
+import tempfile
 
 import freud
 import numpy as np
@@ -13,7 +15,8 @@ from mbuild.utils.geometry import bounding_box
 
 
 class Path:
-    def __init__(self, N=None, coordinates=None, bond_graph=None):
+    def __init__(self, N=None, coordinates=None, bond_graph=None, path_graph=None):
+        self.path_graph = path_graph
         self.bond_graph = bond_graph
         # Only N is defined, make empty coordinates array with size N
         # Use case: Random walks
@@ -35,6 +38,12 @@ class Path:
         self.generate()
         if self.N is None:
             self.N = len(self.coordinates)
+        if self.path_graph == "linear":
+            self.path_graph = BondGraph()
+            self.path_graph.add_node(tuple(coordinates[0]))
+            for point1, point2 in zip(self.coordinates, self.coordinates[1:]):
+                self.path_graph.add_node(tuple(point2))
+                self.path_graph.add_edge(tuple(point1), tuple(point2))
 
     @classmethod
     def from_coordinates(cls, coordinates, bond_graph=None):
@@ -70,13 +79,28 @@ class Path:
         return nlist
 
     def to_compound(self, bead_name="_A", bead_mass=1):
-        """Visualize a path as an mBuild Compound."""
+        """Create an mBuild Compound using the coordinates and path_graph of a Path."""
         compound = Compound()
         for xyz in self.coordinates:
             compound.add(Compound(name=bead_name, mass=bead_mass, pos=xyz))
-        if self.bond_graph:
-            compound.set_bond_graph(self.bond_graph)
+        if self.path_graph:
+            # use the path_graph to create a bond graph
+            bond_graph = self.path_graph_to_bond_graph(compound)
+            compound.set_bond_graph(bond_graph)
         return compound
+    
+    def path_graph_to_bond_graph(self, compound):
+        """Take a preset path_graph and return a bond_graph with the particles of a given compound."""
+        bond_graph = BondGraph()
+        for i in range(compound.n_particles):
+            bond_graph.add_node(i) # needs to be the index of compound
+        if self.path_graph:
+            path_to_index_map = {tuple(coord):i for i, coord in enumerate(self.coordinates)}
+            for point1, point2 in self.path_graph.edges:
+                index1 = path_to_index_map[tuple(point1)]
+                index2 = path_to_index_map[tuple(point2)]
+                bond_graph.add_edge(index1, index2)
+        return bond_graph
 
     def apply_mapping(self):
         # TODO: Finish, add logic to align orientation with path site pos and bond graph
@@ -94,6 +118,37 @@ class Path:
         Might be useful for more complicated random walks/branching algorithms
         """
         pass
+
+    def visualize(self, bead_color="#5d8aa8"):
+        """Visualize in 3D space using py3Dmol of the Path as a Compound."""
+        py3Dmol = import_("py3Dmol")
+        compound = self.to_compound()
+        color_scheme = {"C": bead_color} # just use default Carbon element to set color
+        for particle in compound.particles():
+                particle.name = "C"
+        tmp_dir = tempfile.mkdtemp()
+        compound.save(
+            os.path.join(tmp_dir, "tmp.mol2"),
+            include_ports=False,
+            overwrite=True,
+        )
+
+        view = py3Dmol.view()
+        with open(os.path.join(tmp_dir, "tmp.mol2"), "r") as f:
+            view.addModel(f.read(), "mol2", keepH=True)
+
+        view.setStyle(
+            {
+                "stick": {"radius": 0.3, "color": "grey"},
+                "sphere": {
+                    "radius": self.radius*10/2 if self.radius else 1.7/2, # angstroms
+                    "colorscheme": color_scheme,
+                },
+            }
+        )
+        view.zoomTo()
+
+        return view
 
 
 class HardSphereRandomWalk(Path):
@@ -114,6 +169,7 @@ class HardSphereRandomWalk(Path):
         trial_batch_size=20,
         tolerance=1e-5,
         bond_graph=None,
+        path_graph=None,
     ):
         """Generates coordinates from a self avoiding random walk using
         fixed bond lengths, hard spheres, and minimum and maximum angles
@@ -151,6 +207,9 @@ class HardSphereRandomWalk(Path):
             Tolerance used for rounding and checkig for overlaps.
         bond_graph : networkx.graph.Graph; optional
             Sets the bonding of sites along the path.
+        path_graph : str; optional, default=None
+            A passable string to define the bond_graph used in the Path. Options are:
+            `linear`: each coordinate is connected to the previous coordinate to create a linear path.
 
         Notes
         -----
@@ -184,8 +243,7 @@ class HardSphereRandomWalk(Path):
         self.attempts = 0
         self.start_from_path_index = start_from_path_index
         self.start_from_path = start_from_path
-
-        # This random walk is including a previous path
+        self.path_graph = path_graph
         if start_from_path:
             coordinates = np.concatenate(
                 (
@@ -209,7 +267,7 @@ class HardSphereRandomWalk(Path):
         self.rng = np.random.default_rng(seed)
 
         super(HardSphereRandomWalk, self).__init__(
-            coordinates=coordinates, N=None, bond_graph=bond_graph
+            coordinates=coordinates, N=None, bond_graph=bond_graph, path_graph=path_graph
         )
 
     def generate(self):
