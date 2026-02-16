@@ -1887,6 +1887,17 @@ def to_gmso(
         The converted gmso Topology
     """
     from gmso.external.convert_mbuild import from_mbuild
+    bond_orderDict = {
+        "single": 1.0,
+        "double": 2.0,
+        "triple": 3.0,
+        "aromatic": 1.0,
+        "unspecified": 0.0,
+        "default": 1.0,
+    }
+    bg = compound.bond_graph
+    for edge in bg.edges(data=True):
+        edge[2]["bond_order"] = bond_orderDict.get(edge[2]["bond_order"], 0.0)
 
     return from_mbuild(
         compound=compound,

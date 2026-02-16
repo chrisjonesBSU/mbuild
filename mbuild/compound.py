@@ -210,6 +210,24 @@ class Compound(object):
         self._bond_tag = None
         self._hoomd_data = {}
 
+    @classmethod
+    def from_bondgraph(cls, bondgraph):
+        """Create an mb.Compound from some mb.BondGraph."""
+        assert isinstance(bondgraph, BondGraph)
+        cpd = cls()
+        searched_nodes = dict()
+        for u, v, border in bondgraph.edges.data("bond_order"):
+            new_edge = []
+            for node in (u, v):
+                if node not in searched_nodes:
+                    particle = Compound(name=node.name, pos=node.pos)
+                    searched_nodes[node] = particle
+                    particle.parent = cpd
+                    cpd.children.append(particle)
+                new_edge.append(searched_nodes[node])
+            cpd.add_bond(new_edge, bond_order=border)
+        return cpd
+
     def particles(self, include_ports=False):
         """Return all Particles of the Compound.
 
@@ -1744,6 +1762,18 @@ class Compound(object):
         if particle_array is None:
             particle_array = np.array(list(self.particles()))
         return particle_array[idxs]
+    
+    def _classify_periodic_bonds(self):
+        """Bin bonds that sets that do and do not cross periodic boundaries."""
+        box_lengths = np.array(self.box.lengths) / 2
+        periodic_bonds = set()
+        aperiodic_bonds = set()
+        for particle1, particle2 in self.bonds():
+            if np.any(np.abs(particle1.pos - particle2.pos) > box_lengths):
+                periodic_bonds.add((particle1, particle2))
+            else:
+                aperiodic_bonds.add((particle1, particle2))
+        return periodic_bonds, aperiodic_bonds
 
     def visualize(
         self,
@@ -1751,7 +1781,7 @@ class Compound(object):
         backend="py3dmol",
         color_scheme={},
         bead_size=0.3,
-        show_bond_tags=False,
+        transparent_periodic_bonds=False,
     ):  # pragma: no cover
         """Visualize the Compound using py3dmol (default) or nglview.
 
@@ -1782,6 +1812,7 @@ class Compound(object):
                     show_ports=show_ports,
                     color_scheme=color_scheme,
                     bead_size=bead_size,
+                    transparent_periodic_bonds=False,
                 )
             else:
                 raise RuntimeError(
@@ -1792,7 +1823,7 @@ class Compound(object):
         else:
             raise RuntimeError("Visualization is only supported in Jupyter Notebooks.")
 
-    def _visualize_py3dmol(self, show_ports=False, color_scheme={}, bead_size=0.3):
+    def _visualize_py3dmol(self, show_ports=False, color_scheme={}, bead_size=0.3, transparent_periodic_bonds=False,):
         """Visualize the Compound using py3Dmol.
 
         Allows for visualization of a Compound within a Jupyter Notebook.
@@ -1832,27 +1863,105 @@ class Compound(object):
             if not particle.name:
                 particle.name = "UNK"
         tmp_dir = tempfile.mkdtemp()
-        cloned.save(
-            os.path.join(tmp_dir, "tmp.mol2"),
-            include_ports=show_ports,
-            overwrite=True,
-        )
+        if transparent_periodic_bonds:
+            # save into two mol2 files, one with periodic bonds and one without
+            periodic_bonds, aperiodic_bonds = cloned._classify_periodic_bonds()
+            periodicGraph = nx.subgraph_view(
+                cloned.bond_graph,
+                filter_edge=lambda n1, n2: (n1, n2) in periodic_bonds
+                or (n2, n1) in periodic_bonds,
+            )
+            aperiodicGraph = nx.subgraph_view(
+                cloned.bond_graph,
+                filter_edge=lambda n1, n2: (n1, n2) in aperiodic_bonds
+                or (n2, n1) in aperiodic_bonds,
+            )
+            cpd1 = Compound.from_bondgraph(periodicGraph)
+            cpd2 = Compound.from_bondgraph(aperiodicGraph)
+            cpd1.save(
+                os.path.join(tmp_dir, "periodic.mol2"),
+                include_ports=show_ports,
+            )
+            cpd2.save(
+                os.path.join(tmp_dir, "aperiodic.mol2"),
+                include_ports=show_ports,
+            )
+            view = py3Dmol.view()
+            with open(os.path.join(tmp_dir, "periodic.mol2"), "r") as f:
+                view.addModel(f.read(), "mol2", keepH=True)
+            with open(os.path.join(tmp_dir, "aperiodic.mol2"), "r") as f:
+                view.addModel(f.read(), "mol2", keepH=True)
 
-        view = py3Dmol.view()
-        with open(os.path.join(tmp_dir, "tmp.mol2"), "r") as f:
-            view.addModel(f.read(), "mol2", keepH=True)
+            if isinstance(bead_size, dict):
+                for bead, size in bead_size.items():
+                    view.addStyle({"and": [{"model": 1}, {"atom":bead}]}, {
+                                "sphere": {
+                                    "scale": size,
+                                    "color": modified_color_scheme[bead],
+                                },
+                                "stick": {"radius": 0.4, "color": "grey"}
+                            }
+                        )
+            else:
+                view.setStyle(
+                    {"model": 1},
+                    {
+                        "stick": {"radius": bead_size * 0.6, "color": "grey"},
+                        "sphere": {
+                            "scale": bead_size,
+                            "colorscheme": modified_color_scheme,
+                        },
+                    },
+                )
 
-        view.setStyle(
-            {
-                "stick": {"radius": bead_size * 0.6, "color": "grey"},
-                "sphere": {
-                    "scale": bead_size,
-                    "colorscheme": modified_color_scheme,
+            view.setStyle(
+                {"model": 0},
+                {
+                    "stick": {
+                        "radius": 0.1,
+                        "color": "grey",
+                        "opacity": 0.5,
+                    },
+                    "sphere": {
+                        "scale": min(list(bead_size.values())),
+                        "colorscheme": modified_color_scheme,
+                    },
                 },
-            }
-        )
-        view.zoomTo()
+            )
+        else:
+            cloned.save(
+                os.path.join(tmp_dir, "tmp.mol2"),
+                include_ports=show_ports,
+                overwrite=True,
+            )
 
+            view = py3Dmol.view()
+            with open(os.path.join(tmp_dir, "tmp.mol2"), "r") as f:
+                view.addModel(f.read(), "mol2", keepH=True)
+            
+            if isinstance(bead_size, dict):
+                view.setStyle({"stick": {"radius": 0.4, "color": "grey"}})
+                for bead, size in bead_size.items():
+                    view.addStyle(
+                            {"atom":bead}, {
+                                "sphere": {
+                                    "scale": size,
+                                    "color": modified_color_scheme[bead],
+                                },
+                            }
+                        )
+            else:
+                view.setStyle(
+                    {
+                        "stick": {"radius": bead_size * 0.6, "color": "grey"},
+                        "sphere": {
+                            "scale": bead_size,
+                            "colorscheme": modified_color_scheme,
+                        },
+                    }
+                )
+            
+        view.zoomTo()
         return view
 
     def _visualize_nglview(self, show_ports=False, color_scheme={}, bead_size=0.3):
