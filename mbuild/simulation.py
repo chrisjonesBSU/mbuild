@@ -10,10 +10,12 @@ import numpy as np
 from ele.element import element_from_name, element_from_symbol
 from ele.exceptions import ElementError
 from gmso.parameterization import apply
+from gmso.external.convert_parmed import to_parmed as gmso_to_parmed
 
 from mbuild import Compound
 from mbuild.exceptions import MBuildError
 from mbuild.utils.io import import_
+from mbuild.path import Path
 
 
 class HoomdSimulation(hoomd.simulation.Simulation):
@@ -671,7 +673,13 @@ def energy_minimize(
     """
     # TODO: Update mbuild tutorials to provide overview of new features
     #   Preliminary tutorials: https://github.com/chrisiacovella/mbuild_energy_minimization
-    com = compound.pos
+    if isinstance(compound, Compound):
+        prevPath = False
+        com = compound.pos
+    elif isinstance(compound, Path):
+        prevPath = compound
+        compound = compound.to_compound()
+        com = compound.pos
     anchor_in_compound = False
     if anchor is not None:
         # check to see if the anchor exists
@@ -687,35 +695,46 @@ def energy_minimize(
                 "that you are trying to energy minimize."
             )
     compound._kick()
-    extension = os.path.splitext(forcefield)[-1]
-    openbabel_ffs = ["MMFF94", "MMFF94s", "UFF", "GAFF", "Ghemical"]
-    if forcefield in openbabel_ffs:
-        _energy_minimize_openbabel(
-            compound=compound, forcefield=forcefield, steps=steps, **kwargs
-        )
-    else:
-        tmp_dir = tempfile.mkdtemp()
-        compound.save(os.path.join(tmp_dir, "un-minimized.mol2"))
-
-        if extension == ".xml":
-            _energy_minimize_openmm(
-                compound=compound,
-                tmp_dir=tmp_dir,
-                forcefield_files=forcefield,
-                forcefield_name=None,
-                steps=steps,
-                **kwargs,
+    if isinstance(forcefield, str):
+        extension = os.path.splitext(forcefield)[-1]
+        openbabel_ffs = ["MMFF94", "MMFF94s", "UFF", "GAFF", "Ghemical"]
+        if forcefield in openbabel_ffs:
+            _energy_minimize_openbabel(
+                compound=compound, forcefield=forcefield, steps=steps, **kwargs
             )
         else:
-            _energy_minimize_openmm(
-                compound=compound,
-                tmp_dir=tmp_dir,
-                forcefield_files=None,
-                forcefield_name=forcefield,
-                steps=steps,
-                **kwargs,
-            )
+            tmp_dir = tempfile.mkdtemp()
+            compound.save(os.path.join(tmp_dir, "un-minimized.mol2"))
 
+            if extension == ".xml":
+                _energy_minimize_openmm(
+                    compound=compound,
+                    tmp_dir=tmp_dir,
+                    forcefield_files=forcefield,
+                    forcefield_name=None,
+                    steps=steps,
+                    **kwargs,
+                )
+            else:
+                _energy_minimize_openmm(
+                    compound=compound,
+                    tmp_dir=tmp_dir,
+                    forcefield_files=None,
+                    forcefield_name=forcefield,
+                    steps=steps,
+                    **kwargs,
+                )
+    elif isinstance(forcefield, gmso.ForceField):
+        tmp_dir = tempfile.mkdtemp()
+        _energy_minimize_openmm(
+            compound=compound,
+            tmp_dir=tmp_dir,
+            forcefield_files=forcefield,
+            forcefield_name=None,
+            steps=steps,
+            **kwargs,
+        )
+    else:
         compound.update_coordinates(os.path.join(tmp_dir, "minimized.pdb"))
 
     if shift_com:
@@ -725,6 +744,8 @@ def energy_minimize(
         anchor_pos_new = anchor.pos
         delta = anchor_pos_old - anchor_pos_new
         compound.translate(delta)
+    if prevPath:
+        prevPath.coordinates = compound.xyz
 
 
 def _energy_minimize_openmm(
@@ -779,9 +800,17 @@ def _energy_minimize_openmm(
     """
     foyer = import_("foyer")
 
-    to_parmed = compound.to_parmed()
-    ff = foyer.Forcefield(forcefield_files=forcefield_files, name=forcefield_name)
-    to_parmed = ff.apply(to_parmed)
+    if isinstance(forcefield_files, str) or isinstance(forcefield_name,str):
+        ff = foyer.Forcefield(forcefield_files=forcefield_files, name=forcefield_name)
+        to_parmed = ff.apply(to_parmed)
+    elif isinstance(forcefield_files, gmso.ForceField):
+        top = compound.to_gmso()
+        if forcefield_files.angle_types:
+            ptop = apply(top, forcefield_files, identify_connections=True)
+            to_parmed = gmso_to_parmed(ptop)
+        else:
+            ptop = apply(top, forcefield_files)
+            to_parmed = gmso_to_parmed(ptop)
 
     import openmm.unit as u
     from openmm.app import AllBonds, HAngles, HBonds
@@ -1210,3 +1239,76 @@ def _energy_minimize_openbabel(
         y = obatom.GetY() / 10.0
         z = obatom.GetZ() / 10.0
         compound[i].pos = np.array([x, y, z])
+
+
+def energy_minimize_path(
+    path,
+    bead_size=0.3,
+    steps=1000,
+):
+    positions = path.get_coordinates()
+    n_particles = len(positions)
+
+    import openmm
+    import openmm.unit as u
+    from openmm.app import AllBonds, Topology
+    from openmm.app.simulation import Simulation
+    from openmm.openmm import LangevinIntegrator
+
+    # system = to_parmed.createSystem(
+    #     constraints=AllBonds
+    # )  # Create an OpenMM System
+
+    system = openmm.System()
+    for i in range(n_particles):
+        system.addParticle(1.0 * u.amu)
+
+    # Create a Langenvin Integrator in OpenMM
+    integrator = LangevinIntegrator(
+        298 * u.kelvin, 1 / u.picosecond, 0.001 * u.picoseconds
+    )
+    # Create Simulation object in OpenMM
+    # simulation = Simulation(to_parmed.topology, system, integrator)
+
+    # # Loop through forces in OpenMM System and set parameters
+    # for force in system.getForces():
+    #     if type(force).__name__ == "NonbondedForce":
+    #         for nb_index in range(force.getNumParticles()):
+    #             charge, sigma, epsilon = force.getParticleParameters(nb_index)
+    #             force.setParticleParameters(
+    #                 nb_index, charge, sigma, epsilon * scale_nonbonded
+    #             )
+    #         force.updateParametersInContext(simulation.context)
+
+    # Set nonbonded force for each particle
+    nonbonded_force = openmm.NonbondedForce()
+    nonbonded_force.setNonbondedMethod(openmm.NonbondedForce.NoCutoff)
+    sigma  = bead_size * u.nanometer
+    epsilon = 0.1 * u.kilocalories_per_mole
+    for i in range(n_particles):
+        nonbonded_force.addParticle(0.0, sigma, epsilon)
+    system.addForce(nonbonded_force)
+    for i, j in path.bond_graph.edges():
+        bond_length = np.linalg.norm(positions[j] - positions[i])
+        system.addConstraint(i, j, bond_length * u.nanometer)
+
+    topology = Topology()
+    chain = topology.addChain()
+    for i in range(n_particles):
+        residue = topology.addResidue(f"LJ{i}", chain)
+        topology.addAtom(f"P{i}", openmm.app.Element.getByMass(1), residue)
+    # Add bonds to topology
+    atomsList = list(topology.atoms())
+    for i, j in path.bond_graph.edges():
+        topology.addBond(atomsList[i], atomsList[j])
+
+    simulation = Simulation(topology, system, integrator)
+    simulation.context.setPositions(positions)
+
+    # Run energy minimization through OpenMM
+    simulation.minimizeEnergy(maxIterations=steps)
+
+    # Get positions directly
+    state = simulation.context.getState(getPositions=True)
+    path.coordinates  = np.array(state.getPositions(asNumpy=True))
+

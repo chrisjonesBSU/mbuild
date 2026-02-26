@@ -4,13 +4,13 @@ import logging
 import math
 import time
 from abc import abstractmethod
-from copy import deepcopy
+from copy import deepcopy, copy
 
 import networkx as nx
 import numpy as np
 from scipy.interpolate import interp1d
 
-from mbuild import Compound
+from mbuild import Compound, Box
 from mbuild.path.path_utils import check_path, random_coordinate
 from mbuild.utils.volumes import CuboidConstraint, CylinderConstraint
 
@@ -88,6 +88,10 @@ class Path:
             self.N = len(self.coordinates)
         if self.N is None:
             self.N = len(self.coordinates)
+
+    def to_freud(self):
+        from mbuild.path.path_utils import to_freud
+        return to_freud(self)
 
     @classmethod
     def from_coordinates(cls, coordinates, bead_name="_A", bond_graph=nx.Graph()):
@@ -194,6 +198,8 @@ class Path:
             compounds.append(Compound(name=attrs["name"], pos=attrs["xyz"]))
         compound.add(compounds)
         compound.set_bond_graph(self.bond_graph)
+        if any(getattr(self, "box_lengths", [None])):
+            compound.box = Box(self.box_lengths)
         return compound
 
     def apply_mapping(self):
@@ -330,6 +336,7 @@ class HardSphereRandomWalk(Path):
         self.start_from_path = start_from_path
         self.attach_paths = attach_paths
         self._particle_pairs = {}
+        self.n_init_sites = 0 if not start_from_path else len(start_from_path.coordinates)
         self.chunk_size = chunk_size
         self.run_on_gpu = bool(run_on_gpu) and _CUDA_AVAILABLE
         self._gpu_static_points = None
@@ -382,9 +389,13 @@ class HardSphereRandomWalk(Path):
                 axis=0,
             )
             self.count = len(start_from_path.coordinates)
-            bond_graph = deepcopy(start_from_path.bond_graph)
-            if start_from_path_index is not None and start_from_path_index < 0:
-                self.start_from_path_index = self.count + start_from_path_index
+            N = None
+            bond_graph = start_from_path.bond_graph
+            # bond_graph = deepcopy(start_from_path.bond_graph)
+            if start_from_path_index is not None and start_from_path_index >= 0:
+                self.start_from_path_index = start_from_path_index
+            else:
+                self.start_from_path_index = len(bond_graph) - 1# start from last path
 
         # Not starting from another path
         # Set default values for coordinates, bond graph and count
@@ -578,6 +589,9 @@ class HardSphereRandomWalk(Path):
         if self.termination.success:
             logger.info("Random walk successful.")
         else:
+            # remove extra particles added to bondgraph and coordinates
+            self.bond_graph.remove_nodes_from(list(range(self.n_init_sites, self.count+1)))
+            self.coordinates = self.coordinates[:self.n_init_sites]
             logger.warning("Random walk not successful.")
             logger.warning(self.termination.summarize())
 
@@ -642,6 +656,13 @@ class HardSphereRandomWalk(Path):
         elif self.start_from_path and self.start_from_path_index is not None:
             # TODO: handle start_from_path index of negative values
             # Set to the corresponding actual index value of the last path
+            if len(self.bond_graph) == 1:
+                vector = np.random.randn(3)
+                vector = vector / np.linalg.norm(vector) * self.bond_length
+                return self.start_from_path.get_coordinates()[
+                        self.start_from_path_index
+                    ] + vector
+
             if self.start_from_path_index == 0:
                 pos2_coord = 1  # Use the second (1) point of the last path for angles
             else:  # use the site previous to start_from_path_index for angles
@@ -690,7 +711,12 @@ class HardSphereRandomWalk(Path):
                     ):
                         return xyz
                 self.attempts += 1
-                started_next_path = self.termination.is_met()
+                if self.termination.is_met():
+                    raise RuntimeError(
+                        "The maximum number attempts allowed have passed, and only ",
+                        f"{self.count - self._init_count} successful attempts were completed.",
+                        "Try changing the parameters or seed and running again.",
+                    )
 
     def _prepare_gpu_static_points(self):
         """Transfer static points to GPU once at the start of generation."""

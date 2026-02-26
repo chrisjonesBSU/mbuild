@@ -22,6 +22,10 @@ class Box(object):
         Angles (in degrees) that define the tilt of the edges of the box. If
         None is given, angles are assumed to be [90.0, 90.0, 90.0]. These are
         also known as alpha, beta, gamma in the crystallography community.
+    periodicity : list-like, shape(3,), dtype=bool, default=None
+        Whether the box is periodic in the x, y, and z directions.
+        If None is provided, the periodicity is set to (False, False, False)
+        which is non-periodic in all directions.
     precision : int, optional, default=None
         Control the precision of the floating point representation of box
         attributes. If none provided, the default is 6 decimals.
@@ -49,6 +53,8 @@ class Box(object):
     yz : float
         Tilt factor needed to displace an orthogonal box's yz face to its
         parallelepiped structure.
+    periodicity : tuple, shape=(3,), dtype=bool
+        The periodic nature of the system
     precision : int
         Precision of the floating point numbers when accessing values.
 
@@ -57,7 +63,11 @@ class Box(object):
     Box vectors are expected to be provided in row-major format.
     """
 
-    def __init__(self, lengths, angles=None, precision=None):
+    def __init__(self, lengths, angles=None, periodicity=None, precision=None):
+        if periodicity is not None:
+            self._periodicity = tuple(periodicity)
+        else:
+            self._periodicity = (False, False, False)
         if precision is not None:
             self._precision = int(precision)
         else:
@@ -78,12 +88,12 @@ class Box(object):
         self._yz = yz
 
     @classmethod
-    def from_lengths_angles(cls, lengths, angles, precision=None):
+    def from_lengths_angles(cls, lengths, angles, periodicity=None, precision=None):
         """Generate a box from lengths and angles."""
-        return cls(lengths=lengths, angles=angles, precision=precision)
+        return cls(lengths=lengths, angles=angles, periodicity=periodicity, precision=precision)
 
     @classmethod
-    def from_uvec_lengths(cls, uvec, lengths, precision=None):
+    def from_uvec_lengths(cls, uvec, lengths, periodicity=None, precision=None):
         """Generate a box from unit vectors and lengths."""
         uvec = np.asarray(uvec)
         uvec.reshape(3, 3)
@@ -100,18 +110,18 @@ class Box(object):
         scaled_vec = (uvec.T * lengths).T
         (alpha, beta, gamma) = _calc_angles(scaled_vec)
 
-        return cls(lengths=lengths, angles=(alpha, beta, gamma), precision=precision)
+        return cls(lengths=lengths, angles=(alpha, beta, gamma), periodicity=periodicity, precision=precision)
 
     @classmethod
-    def from_mins_maxs_angles(cls, mins, maxs, angles, precision=None):
+    def from_mins_maxs_angles(cls, mins, maxs, angles, periodicity=None, precision=None):
         """Generate a box from min/max distance calculations and angles."""
         (x_min, y_min, z_min) = mins
         (x_max, y_max, z_max) = maxs
         lengths = (x_max - x_min, y_max - y_min, z_max - z_min)
-        return cls(lengths=lengths, angles=angles, precision=precision)
+        return cls(lengths=lengths, angles=angles, periodicity=periodicity, precision=precision)
 
     @classmethod
-    def from_vectors(cls, vectors, precision=None):
+    def from_vectors(cls, vectors, periodicity=None, precision=None):
         """Generate a box from box vectors."""
         vectors = _validate_box_vectors(vectors)
         (alpha, beta, gamma) = _calc_angles(vectors)
@@ -123,10 +133,10 @@ class Box(object):
         Ly = np.linalg.norm(v2)
         Lz = np.linalg.norm(v3)
         lengths = (Lx, Ly, Lz)
-        return cls(lengths=lengths, angles=(alpha, beta, gamma), precision=precision)
+        return cls(lengths=lengths, angles=(alpha, beta, gamma), periodicity=periodicity, precision=precision)
 
     @classmethod
-    def from_lengths_tilt_factors(cls, lengths, tilt_factors=None, precision=None):
+    def from_lengths_tilt_factors(cls, lengths, tilt_factors=None, periodicity=None, precision=None):
         """Generate a box from box lengths and tilt factors."""
         (Lx, Ly, Lz) = lengths
         if tilt_factors is None:
@@ -136,10 +146,10 @@ class Box(object):
 
         vecs = np.asarray([[Lx, 0.0, 0.0], [Ly * xy, Ly, 0.0], [Lz * xz, Lz * yz, Lz]])
         (alpha, beta, gamma) = _calc_angles(vecs)
-        return cls(lengths=lengths, angles=[alpha, beta, gamma], precision=precision)
+        return cls(lengths=lengths, angles=[alpha, beta, gamma], periodicity=periodicity, precision=precision)
 
     @classmethod
-    def from_lo_hi_tilt_factors(cls, lo, hi, tilt_factors, precision=None):
+    def from_lo_hi_tilt_factors(cls, lo, hi, tilt_factors, periodicity=None, precision=None):
         """Generate a box from a lo, hi convention and tilt factors."""
         (xlo, ylo, zlo) = lo
         (xhi, yhi, zhi) = hi
@@ -151,7 +161,7 @@ class Box(object):
         yhi_bound = yhi + max([0.0, yz])
 
         lengths = [xhi_bound - xlo_bound, yhi_bound - ylo_bound, zhi - zlo]
-        return cls.from_lengths_tilt_factors(lengths=lengths, tilt_factors=tilt_factors)
+        return cls.from_lengths_tilt_factors(lengths=lengths, tilt_factors=tilt_factors, periodicity=periodicity, precision=precision)
 
     @property
     def vectors(self):
@@ -182,6 +192,17 @@ class Box(object):
     def lengths(self):
         """Lengths of the box."""
         return self.Lx, self.Ly, self.Lz
+    
+    @property
+    def periodicity(self):
+        """Box periodic boundary conditions."""
+        return self._periodicity
+        
+    
+    @periodicity.setter
+    def periodicity(self, value):
+        """Set Box periodic boundary conditions."""
+        self._periodicity = tuple(value)
 
     @property
     def xy(self):
