@@ -67,18 +67,14 @@ def force_overlap(
             if not from_positions.anchor or not to_positions.anchor:
                 logger.warning("Attempting to form bond from port that has no anchor")
             else:
-                from_positions.anchor.parent.add_bond(
+                from_positions.anchor.add_bond(
                     (from_positions.anchor, to_positions.anchor), bond_order=bond_order
                 )
-                to_positions.anchor.parent.add_bond(
+                to_positions.anchor.add_bond(
                     (from_positions.anchor, to_positions.anchor), bond_order=bond_order
                 )
-                from_positions.anchor.parent.remove(
-                    from_positions, reset_labels=reset_labels
-                )
-                to_positions.anchor.parent.remove(
-                    to_positions, reset_labels=reset_labels
-                )
+                from_positions.anchor.remove(from_positions, reset_labels=reset_labels)
+                to_positions.anchor.remove(to_positions, reset_labels=reset_labels)
 
 
 class CoordinateTransform(object):

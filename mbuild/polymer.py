@@ -320,20 +320,24 @@ class Polymer(Compound):
                     this_part.translate_to(coordinates[site_count])
                     this_part_head = this_part.labels[self._port_labels[1]].anchor
                     this_part_tail = this_part.labels[self._port_labels[0]].anchor
-                    v1 = this_part_head.pos - this_part_tail.pos
-                    v1 /= np.linalg.norm(v1)
-                    v2 = coordinates[site_count + 1] - coordinates[site_count]
-                    v2 /= np.linalg.norm(v2)
-                    normal = np.cross(v1, v2)
-                    angle = np.arccos(
-                        v1.dot(v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
-                    )
-                    if angle > np.pi / 2:
-                        angle = np.pi - angle
-                    # Center of mass needs to be at origin for rotation
-                    this_part.translate_to((0, 0, 0))
-                    this_part.rotate(around=normal, theta=angle)
-                    this_part.translate_to(coordinates[site_count])
+                    if this_part_tail == this_part_head:
+                        # no need for any rotation
+                        this_part.translate_to(coordinates[site_count])
+                    else:
+                        v1 = this_part_head.pos - this_part_tail.pos
+                        v1 /= np.linalg.norm(v1)
+                        v2 = coordinates[site_count + 1] - coordinates[site_count]
+                        v2 /= np.linalg.norm(v2)
+                        normal = np.cross(v1, v2)
+                        angle = np.arccos(
+                            v1.dot(v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+                        )
+                        if angle > np.pi / 2:
+                            angle = np.pi - angle
+                        # Center of mass needs to be at origin for rotation
+                        this_part.translate_to((0, 0, 0))
+                        this_part.rotate(around=normal, theta=angle)
+                        this_part.translate_to(coordinates[site_count])
             else:
                 # Transform this part, such that its bottom port is rotated
                 # and translated to the last parts top port.
@@ -348,21 +352,27 @@ class Polymer(Compound):
                         this_part_head = this_part.labels[self._port_labels[1]].anchor
                         this_part_tail = this_part.labels[self._port_labels[0]].anchor
                         # Get this parts head-tail vector (head port pos - tail port pos)
-                        v1 = this_part_head.pos - this_part_tail.pos
-                        v1 /= np.linalg.norm(v1)
-                        # v2 is the vector between the previous site pos and next site pos
-                        v2 = coordinates[site_count + 1] - coordinates[site_count - 1]
-                        v2 /= np.linalg.norm(v2)
-                        normal = np.cross(v1, v2)
-                        angle = np.arccos(
-                            v1.dot(v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
-                        )
-                        if angle > np.pi / 2:
-                            angle = np.pi - angle
-                        # Center of mass needs to be at origin for rotation
-                        this_part.translate_to((0, 0, 0))
-                        this_part.rotate(around=normal, theta=angle)
-                        this_part.translate_to(coordinates[site_count])
+                        if this_part_tail == this_part_head:
+                            this_part.translate_to(coordinates[site_count])
+                        else:
+                            v1 = this_part_head.pos - this_part_tail.pos
+                            v1 /= np.linalg.norm(v1)
+                            # v2 is the vector between the previous site pos and next site pos
+                            v2 = (
+                                coordinates[site_count + 1]
+                                - coordinates[site_count - 1]
+                            )
+                            v2 /= np.linalg.norm(v2)
+                            normal = np.cross(v1, v2)
+                            angle = np.arccos(
+                                v1.dot(v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+                            )
+                            if angle > np.pi / 2:
+                                angle = np.pi - angle
+                            # Center of mass needs to be at origin for rotation
+                            this_part.translate_to((0, 0, 0))
+                            this_part.rotate(around=normal, theta=angle)
+                            this_part.translate_to(coordinates[site_count])
                     except IndexError:
                         pass
             last_part = this_part
@@ -529,14 +539,18 @@ class Polymer(Compound):
                 f"Multiple particles with tag {head_tag} were found. Only one particle can be designated as the head particle."
             )
         head = head[0]
-        head_hydrogens = [p for p in head.direct_bonds() if p.name == "H"]
+        if not head.direct_bonds():
+            head_hydrogens = []
+            head_orientation = np.array([1, 0, 0])
+        else:
+            head_hydrogens = [p for p in head.direct_bonds() if p.name == "H"]
         if len(head_hydrogens) != 0 and head_orientation is None:
             bond_vectors = [h.pos - head.pos for h in head_hydrogens]
             head_orientation = np.sum(bond_vectors, axis=0)
             if np.allclose(head_orientation, 0, atol=1e-10):
                 head_orientation = np.cross(np.random.randn(3), bond_vectors[0])
             head_orientation /= np.linalg.norm(head_orientation)
-
+        x = list(head.particles())
         head_port = Port(
             anchor=head,
             orientation=head_orientation,
@@ -558,7 +572,11 @@ class Polymer(Compound):
                 f"Multiple particles with tag {tail_tag} were found. Only one particle can be designated as the tail particle."
             )
         tail = tail[0]
-        tail_hydrogens = [p for p in tail.direct_bonds() if p.name == "H"]
+        if not tail.direct_bonds():
+            tail_hydrogens = []
+            tail_orientation = -1 * head_orientation
+        else:
+            tail_hydrogens = [p for p in tail.direct_bonds() if p.name == "H"]
         if len(tail_hydrogens) != 0 and tail_orientation is None:
             if tail == head:
                 tail_orientation = -head_orientation
