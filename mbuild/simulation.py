@@ -112,21 +112,21 @@ class HoomdSimulation(hoomd.simulation.Simulation):
         # If a box isn't set, make one with the buffer
         if not self.compound.box:
             self.compound.box = self.compound.get_boundingbox(pad_box=self.box_buffer)
-        shift_coords = True
-        if all(
-            np.max(self.compound.xyz, axis=0) < np.array(self.compound.box.lengths)
-        ) and all(
-            -1 * np.min(self.compound.xyz, axis=0) < np.array(self.compound.box.lengths)
-        ):
-            shift_coords = False
         # Convert to GMSO, apply forcefield
         top = self.compound.to_gmso()
         top.identify_connections()
         # TODO: Make a parameter for ignoring dihedrals?
-        apply(top, forcefields=self.forcefield, ignore_params=["dihedral", "improper"])
+        apply(
+            top,
+            forcefields=self.forcefield,
+            ignore_params=["dihedral", "improper"],
+            speedup_by_moltag=True,
+        )
         # Get hoomd snapshot and force objects
-        forces, _ = gmso.external.to_hoomd_forcefield(top, r_cut=self.r_cut)
-        snap, _ = gmso.external.to_gsd_snapshot(top, shift_coords)
+        forces, _ = gmso.external.to_hoomd_forcefield(top=top, r_cut=self.r_cut)
+        snap, _ = gmso.external.to_gsd_snapshot(
+            top=top, base_units=None, shift_coords=True
+        )
         forces = list(set().union(*forces.values()))
         return snap, forces
 
@@ -291,21 +291,13 @@ class ForcesHandler:
     def scale_sim(self, sim):
         "Iterate through HOOMD force objects and apply scaling factors."
         forcesDict = {
-            "lj": (hoomd.md.pair.LJ, ("epsilon")),
-            "charge": (hoomd.md.special_pair.Coulomb, ("alpha")),
-            "bond": (hoomd.md.bond.Harmonic, ("k")),
-            "angle": (hoomd.md.angle.Harmonic, ("k")),
-            "opls": (
-                hoomd.md.dihedral.OPLS,
-                (
-                    "k1",
-                    "k2",
-                    "k3",
-                    "k4",
-                ),
-            ),
-            "periodic": (hoomd.md.dihedral.Periodic, ("k")),
-            "improper": (hoomd.md.improper.Periodic, ("k")),
+            "lj": (hoomd.md.pair.LJ, "epsilon"),
+            "charge": (hoomd.md.special_pair.Coulomb, "alpha"),
+            "bond": (hoomd.md.bond.Harmonic, "k"),
+            "angle": (hoomd.md.angle.Harmonic, "k"),
+            "opls": (hoomd.md.dihedral.OPLS, "k1", "k2", "k3", "k4"),
+            "periodic": (hoomd.md.dihedral.Periodic, "k"),
+            "improper": (hoomd.md.improper.Periodic, "k"),
         }
         for key, scalar in self.scale_forces.items():
             if not scalar:  # skip scalars of 0
@@ -415,7 +407,7 @@ def hoomd_cap_displacement(
     )
     sim.set_integrator(method=displacement_capped, dt=dt)
     sim.run(n_steps)
-    sim.operations.integrator = None
+    # sim.operations.integrator = None
     sim.update_positions()
     sim._update_snapshot()
 
@@ -528,10 +520,10 @@ def hoomd_fire(
     )
     for sim_num in range(n_iterations):
         sim.run(n_steps)
-        sim.operations.integrator.reset()
+        # sim.operations.integrator.reset()
 
     # Update particle positions, save latest state point snapshot
-    sim.operations.integrator = None
+    # sim.operations.integrator = None
     sim._update_snapshot()
     sim.update_positions()
 
