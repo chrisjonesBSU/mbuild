@@ -103,7 +103,7 @@ class HoomdSimulation(hoomd.simulation.Simulation):
                 state=snapshot, forces=self.forces, forcefield=forcefield
             )
         # Place holders for forces added/changed by specific methods below
-        self.active_forces = []
+        self.active_forces = self.forces 
         self.inactive_forces = []
         super(HoomdSimulation, self).__init__(device=device, seed=seed)
         self.create_state_from_snapshot(snapshot)
@@ -397,8 +397,9 @@ def hoomd_cap_displacement(
     ```
     """
     compound._kick()
-
-    forces_handler.scale_sim(sim)
+    
+    if forces_handler:
+        forces_handler.scale_sim(sim)
 
     # Set up and run
     displacement_capped = hoomd.md.methods.DisplacementCapped(
@@ -502,7 +503,8 @@ def hoomd_fire(
     ```
     """
     compound._kick()
-    forces_handler.scale_sim(sim)
+    if forces_handler:
+        forces_handler.scale_sim(sim)
     # Set up and run
     nvt = hoomd.md.methods.ConstantVolume(filter=sim.get_integrate_group())
     sim.set_fire_integrator(
