@@ -218,7 +218,6 @@ class HoomdSimulation(hoomd.simulation.Simulation):
 
     def _update_snapshot(self):
         snapshot = self.state.get_snapshot()
-        # snapshot_copy = hoomd.Snapshot(snapshot)  # full copy
         self.compound._add_sim_data(state=snapshot)
 
     def add_gsd_writer(self, file_name, write_period):
@@ -308,7 +307,7 @@ class ForcesHandler:
                 self.forcesDict["lj"] = sim.get_force(forcesDict["lj"][0])
                 self.forcesDict["dpd"] = dpd
                 continue
-
+            # TODO: IF SCALE IS ZERO, DON'T SCALE AND ADD IT, SKIP IT
             force = sim.get_force(forcesDict[key][0])
             for param in force.params:
                 for term in forcesDict[key][1:]:
