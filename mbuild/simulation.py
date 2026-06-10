@@ -108,8 +108,10 @@ class HoomdSimulation(hoomd.simulation.Simulation):
         # Place holders for forces added/changed by specific methods below
         self.active_forces = []
         self.inactive_forces = []
+        self._orig_force_params = {}  # populated after forces are known
         super(HoomdSimulation, self).__init__(device=device, seed=seed)
         self.create_state_from_snapshot(snapshot)
+        self._orig_force_params = self._snapshot_force_params()
 
     def _to_hoomd_snap_forces(self):
         # If a box isn't set, make one with the buffer
@@ -126,12 +128,21 @@ class HoomdSimulation(hoomd.simulation.Simulation):
             speedup_by_moltag=True,
         )
         # Get hoomd snapshot and force objects
-        forces, _ = gmso.external.to_hoomd_forcefield(top=top, r_cut=self.r_cut)
-        snap, _ = gmso.external.to_gsd_snapshot(
-            top=top, base_units=None, shift_coords=True
-        )
+        forces, _ = gmso.external.to_hoomd_forcefield(top, r_cut=self.r_cut)
+        snap, _ = gmso.external.to_gsd_snapshot(top=top)
         forces = list(set().union(*forces.values()))
         return snap, forces
+
+    def _snapshot_force_params(self):
+        """Snapshot current force params so ForcesHandler can restore before re-scaling."""
+        orig = {}
+        for force in self.forces:
+            if not hasattr(force, "params"):
+                continue
+            orig[id(force)] = {
+                param: dict(force.params[param]) for param in force.params
+            }
+        return orig
 
     def get_integrate_group(self):
         # Get indices of compounds to include in integration
@@ -327,9 +338,13 @@ class ForcesHandler:
                 continue
             # TODO: IF SCALE IS ZERO, DON'T SCALE AND ADD IT, SKIP IT
             force = sim.get_force(forcesDict[key][0])
+            orig_params = sim._orig_force_params.get(id(force), {})
             for param in force.params:
                 for term in forcesDict[key][1:]:
-                    force.params[param][term] *= scalar
+                    if param in orig_params and term in orig_params[param]:
+                        force.params[param][term] = orig_params[param][term] * scalar
+                    else:
+                        force.params[param][term] *= scalar
             sim.active_forces.append(force)
             self.forcesDict[key] = force  # store for usage elsewhere
 
