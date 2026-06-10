@@ -413,6 +413,8 @@ class TestSimulationHoomd(BaseTest):
 
     @pytest.mark.skipif(not has_hoomd, reason="hoomd is not installed")
     def test_capped_displacement(self, sim):
+        bond = sim.get_force(hoomd.md.bond.Harmonic)
+        orig_bond_params = {p: dict(bond.params[p]) for p in bond.params}
         ffhandler = ForcesHandler(dpd=1, scale_bond=0.1, scale_angle=0)
         cpd = sim.compound
         old_coords = cpd.xyz.copy()
@@ -436,3 +438,47 @@ class TestSimulationHoomd(BaseTest):
     @pytest.mark.skipif(not has_hoomd, reason="hoomd is not installed")
     def test_plots_energy(self, octane):
         pass
+=======
+        for p in bond.params:
+            assert np.isclose(bond.params[p]["k"], orig_bond_params[p]["k"] * 0.1)
+
+    @pytest.mark.skipif(not has_hoomd, reason="hoomd is not installed")
+    def test_scale_forces_restores_on_second_call(self, sim):
+        bond = sim.get_force(hoomd.md.bond.Harmonic)
+        angle = sim.get_force(hoomd.md.angle.Harmonic)
+        orig_bond_params = {p: dict(bond.params[p]) for p in bond.params}
+        orig_angle_params = {p: dict(angle.params[p]) for p in angle.params}
+
+        ForcesHandler(scale_bond=0.5, scale_angle=0.5).scale_sim(sim)
+        for p in bond.params:
+            assert np.isclose(bond.params[p]["k"], orig_bond_params[p]["k"] * 0.5)
+        for p in angle.params:
+            assert np.isclose(angle.params[p]["k"], orig_angle_params[p]["k"] * 0.5)
+
+        ForcesHandler(scale_bond=1, scale_angle=1).scale_sim(sim)
+        for p in bond.params:
+            assert np.isclose(bond.params[p]["k"], orig_bond_params[p]["k"])
+        for p in angle.params:
+            assert np.isclose(angle.params[p]["k"], orig_angle_params[p]["k"])
+
+    @pytest.mark.skipif(not has_hoomd, reason="hoomd is not installed")
+    def test_get_energy(self, sim):
+        cpd = sim.compound
+        ffhandler = ForcesHandler(scale_lj=1, scale_bond=1, scale_angle=1)
+        assert sim.get_energy() is None
+        hoomd_cap_displacement(
+            cpd, sim, ffhandler, dt=1, max_displacement=1, n_steps=10
+        )
+        energyDict = sim.get_energy()
+        assert np.allclose(
+            energyDict["hoomd.md.pair.pair.LJ"], np.array(([-1.25498152, 0.0]))
+        )
+        assert np.allclose(
+            energyDict["hoomd.md.bond.Harmonic"],
+            np.array(([1.35651551e02, 3.05080224e06])),
+        )
+        assert np.allclose(
+            energyDict["hoomd.md.angle.Harmonic"],
+            np.array(([3942.05658645, 19129.72619001])),
+        )
+>>>>>>> 3843db014e758916ff789344ba3818e447f9adb6
