@@ -1214,6 +1214,8 @@ def hard_sphere_random_walk(
                 candidates,
                 radius,
                 tolerance,
+                pbc=pbc,
+                box_lengths=box_lengths,
             )
             valid_candidates = candidates[valid_mask]
             if len(valid_candidates) > 0:
