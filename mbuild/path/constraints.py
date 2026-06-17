@@ -381,3 +381,91 @@ def is_inside_cuboid(mins, maxs, points, buffer, pbc):
                     break
         results[i] = inside
     return results
+
+
+class PipeConstraint(Constraint):
+    """A hollow cylinder (pipe): polymer packs in the annular shell, leaving
+    an open central channel running along the z-axis.
+
+    A point is "inside" when it lies in the annulus between ``inner_radius``
+    and ``outer_radius`` and within the cylinder's height. The central cylinder
+    (radius < ``inner_radius``) is left empty -- the channel you might later
+    fill with solvent or small molecules.
+
+    Parameters
+    ----------
+    outer_radius : float, required
+        Outer wall radius of the shell.
+    inner_radius : float, required
+        Radius of the empty central channel. Must be smaller than
+        ``outer_radius``.
+    height : float, required
+        Extent of the cylinder along the z-axis.
+    center : array-like (3,), default (0, 0, 0)
+        Center of the cylinder.
+    """
+
+    def __init__(self, outer_radius, inner_radius, height, center=(0, 0, 0)):
+        if inner_radius >= outer_radius:
+            raise ValueError("inner_radius must be smaller than outer_radius.")
+        self.outer_radius = float(outer_radius)
+        self.inner_radius = float(inner_radius)
+        self.height = float(height)
+        self.center = np.asarray(center, dtype=float)
+        # Axis-aligned bounding box, handy for any caller that wants it.
+        self.mins = self.center - np.array(
+            [self.outer_radius, self.outer_radius, self.height / 2.0]
+        )
+        self.maxs = self.center + np.array(
+            [self.outer_radius, self.outer_radius, self.height / 2.0]
+        )
+
+    def is_inside(self, points, buffer):
+        """Return a boolean mask: True where a point is inside the shell.
+
+        Parameters
+        ----------
+        points : ndarray (N, 3), required
+        buffer : float, required
+            Keep points at least this far from every wall (inner, outer, caps).
+
+        Returns
+        -------
+        ndarray of bool, shape (N,)
+        """
+        d = np.asarray(points, dtype=float) - self.center
+        r = np.hypot(d[:, 0], d[:, 1])
+        inside_radial = (r >= self.inner_radius + buffer) & (
+            r <= self.outer_radius - buffer
+        )
+        inside_z = np.abs(d[:, 2]) <= (self.height / 2.0 - buffer)
+        return inside_radial & inside_z
+
+    def sample_candidates(self, points, n_candidates, buffer, k=10):
+        """Sample candidate points inside the annular shell, low-density-first.
+
+        Follows the same contract as the built-in constraints: if existing
+        ``points`` are given, candidates are sorted so the most "open" spots
+        (largest distance to their k-th nearest neighbor) come first.
+        """
+        r_in = self.inner_radius + buffer
+        r_out = max(self.outer_radius - buffer, r_in)
+        half_h = max(self.height / 2.0 - buffer, 0.0)
+
+        theta = np.random.uniform(0, 2 * np.pi, size=n_candidates)
+        # sqrt-sampling on the radius gives a uniform areal density in the annulus.
+        u = np.random.random(size=n_candidates)
+        r = np.sqrt(u * (r_out**2 - r_in**2) + r_in**2)
+        z = np.random.uniform(-half_h, half_h, size=n_candidates)
+        x = self.center[0] + r * np.cos(theta)
+        y = self.center[1] + r * np.sin(theta)
+        candidates = np.column_stack((x, y, self.center[2] + z))
+
+        if points is None or len(points) == 0:
+            return candidates
+        points = np.asarray(points)
+        points = points[np.isfinite(points).all(axis=1)]
+        tree = cKDTree(points)
+        dists, _ = tree.query(candidates, k=k)
+        density_metric = dists if dists.ndim == 1 else dists[:, -1]
+        return candidates[np.argsort(-density_metric)]  # most open first
