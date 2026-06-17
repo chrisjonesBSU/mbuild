@@ -12,6 +12,7 @@ from mbuild import Compound
 from mbuild.exceptions import PathConvergenceError
 from mbuild.path.constraints import CuboidConstraint, CylinderConstraint
 from mbuild.path.namers import BeadNamer
+from mbuild.path.neighbors import CellList
 from mbuild.path.path_utils import (
     calculate_sq_distances,
     check_path,
@@ -26,6 +27,9 @@ from mbuild.path.points import (
 from mbuild.path.termination import NumSites, Termination, Terminator
 
 logger = logging.getLogger(__name__)
+
+# Switch to the cell list once the system is large enough to beat brute force.
+_CELL_LIST_MIN_N = 30000
 
 
 class Path:
@@ -102,6 +106,8 @@ class Path:
             self.coordinates = np.array([], dtype=np.float32)
             self.bond_graph = nx.Graph()
             self.beads = np.array([], dtype="U10")
+        # Cell list for overlap checks, reused across walks. Invalidated by relaxation.
+        self._cell_list = None
 
     def __eq__(self, other):
         return (
@@ -360,7 +366,14 @@ class Path:
         from mbuild.simulation import energy_minimize_path
 
         energy_minimize_path(self, bead_radius, bond_length, steps, seed, nthreads)
+        self.invalidate_neighbors()
         return
+
+    def invalidate_neighbors(self):
+        """Drop the cached cell list. Call after moving particles externally
+        (e.g. a HOOMD relaxation) so the next walk rebuilds from current positions.
+        """
+        self._cell_list = None
 
 
 def lamellar(
@@ -879,6 +892,7 @@ def hard_sphere_random_walk(
     tolerance=1e-5,
     chunk_size=512,
     run_on_gpu=False,
+    use_cell_list="auto",
 ):
     """Generates coordinates from a self avoiding random walk using
     fixed bond lengths, hard spheres, and minimum and maximum angles
@@ -933,6 +947,10 @@ def hard_sphere_random_walk(
     run_on_gpu : bool, default = False
         If True and CUDA path utilities are available, use GPU-accelerated
         implementations.
+    use_cell_list : {"auto", True, False}, default = "auto"
+        Cell-list acceleration for CPU overlap checks. "auto" switches it on
+        once the system exceeds ~30000 sites; True forces it on; False uses
+        brute force. Ignored when run_on_gpu is True.
     """
     # Create state object to track random walk progress
     state = RandomWalkState(
@@ -950,6 +968,7 @@ def hard_sphere_random_walk(
         trial_batch_size=int(trial_batch_size),
         chunk_size=chunk_size,
         run_on_gpu=bool(run_on_gpu) and _get_cuda_available(),
+        use_cell_list=use_cell_list,
     )
     if path is None:  # Create empty path
         path = Path()
@@ -1024,6 +1043,48 @@ def hard_sphere_random_walk(
 
     state.init_count = state.count
 
+    # Cell list is built lazily once the system crosses the size threshold, so
+    # small/sub-threshold walks pay no bookkeeping overhead.
+    cl_enabled = use_cell_list is not False and not state.run_on_gpu
+    if volume_constraint is not None and hasattr(volume_constraint, "mins"):
+        cl_mins = np.asarray(volume_constraint.mins, dtype=np.float64)
+    else:
+        cl_mins = np.zeros(3, dtype=np.float64)
+
+    def _build_base_list():
+        # Bin only the committed prior points; this-walk points are added under a
+        # transaction so a discarded walk can roll them back instead of rebuilding.
+        cl = CellList(
+            cutoff=radius,
+            mins=cl_mins,
+            box_lengths=box_lengths,
+            pbc=pbc,
+            tolerance=tolerance,
+        )
+        cl.rebuild(coordinates[: state.init_count])
+        if include_compound is not None:
+            for p in np.asarray(include_compound.xyz, dtype=np.float32):
+                cl.insert(p)
+        return cl
+
+    if cl_enabled:
+        # Reuse the path's list if it already holds exactly the prior points.
+        reuse = (
+            path._cell_list is not None
+            and include_compound is None
+            and path._cell_list.is_compatible(radius, cl_mins, box_lengths, pbc)
+            and path._cell_list.n_binned == state.init_count
+        )
+        if reuse:
+            path._cell_list.radius = radius
+            path._cell_list.tolerance = tolerance
+            state.cell_list = path._cell_list
+        elif use_cell_list is True or state.init_count >= _CELL_LIST_MIN_N:
+            state.cell_list = _build_base_list()
+            path._cell_list = state.cell_list
+        if state.cell_list is not None:
+            state.cell_list.begin_transaction()
+
     # Select methods for random walk
     if state.run_on_gpu:
         from mbuild.path.path_utils_gpu import check_path_split
@@ -1081,6 +1142,11 @@ def hard_sphere_random_walk(
                         f"Failed after {num_tries + 1} to generate a starting point. System is probably too densely packed."
                     )
 
+    # Bin the two seed points (after they are committed, so retries don't leak).
+    if state.cell_list is not None:
+        state.cell_list.insert(coordinates[state.init_count])
+        state.cell_list.insert(coordinates[state.init_count + 1])
+
     if state.check_termination(path, coordinates, beads):
         return path
 
@@ -1100,6 +1166,15 @@ def hard_sphere_random_walk(
     # Main random walk loop
     walk_finished = False
     while not walk_finished:
+        # Build the cell list the first time the system crosses the threshold.
+        if cl_enabled and state.cell_list is None and state.count >= _CELL_LIST_MIN_N:
+            cell_list = _build_base_list()
+            cell_list.begin_transaction()
+            for i in range(state.init_count, state.count):
+                cell_list.insert(coordinates[i])
+            state.cell_list = cell_list
+            path._cell_list = cell_list
+
         batch_angles, batch_vectors = generate_trials(state)
         candidates = next_step(
             pos1=coordinates[state.count - 1],
@@ -1121,11 +1196,13 @@ def hard_sphere_random_walk(
                 coordinates=coordinates[: state.count],
                 names=beads[: state.count],
             )
-        # Handle postion for PBCs
+        # Handle postion for PBCs. Cast back to float32 (np.mod upcasts) so the
+        # overlap check uses the same precision the coordinates are stored at.
         if any(pbc):
-            candidates = volume_constraint.mins + np.mod(
-                candidates - volume_constraint.mins, box_lengths
-            )
+            candidates = (
+                volume_constraint.mins
+                + np.mod(candidates - volume_constraint.mins, box_lengths)
+            ).astype(np.float32)
         # Check candidate sites
         accept_xyz = None
         if state.run_on_gpu and len(candidates) > 0:
@@ -1141,6 +1218,11 @@ def hard_sphere_random_walk(
             valid_candidates = candidates[valid_mask]
             if len(valid_candidates) > 0:
                 accept_xyz = valid_candidates[0]
+        elif state.cell_list is not None:
+            # Cell list holds all prior points (plus any include_compound).
+            idx = state.cell_list.query_batch(candidates)
+            if idx >= 0:
+                accept_xyz = candidates[idx]
         else:
             existing_points = coordinates[: state.count]
             if state.include_compound:  # Include compound's particle coordinates
@@ -1162,6 +1244,8 @@ def hard_sphere_random_walk(
             coordinates[state.count] = accept_xyz
             beads[state.count] = next(namer)
             state.count += 1
+            if state.cell_list is not None:
+                state.cell_list.insert(accept_xyz)
 
         state.attempts += 1
 
@@ -1244,6 +1328,7 @@ class RandomWalkState:
         trial_batch_size=20,
         chunk_size=512,
         run_on_gpu=False,
+        use_cell_list="auto",
     ):
         self.bond_length = bond_length
         self.radius = radius
@@ -1293,6 +1378,7 @@ class RandomWalkState:
         self.trial_batch_size = trial_batch_size
         self.chunk_size = chunk_size
         self.run_on_gpu = run_on_gpu
+        self.use_cell_list = use_cell_list
 
         # State tracking
         self.count = 0
@@ -1300,6 +1386,7 @@ class RandomWalkState:
         self.attempts = 0
         self.start_time = None
         self.gpu_static_points = None
+        self.cell_list = None
         # PBC info for overlap checks; populated in hard_sphere_random_walk.
         # Defaults reproduce non-periodic behavior.
         self.pbc = np.array([False, False, False], dtype=np.bool_)
@@ -1327,9 +1414,13 @@ class RandomWalkState:
                 logger.info("Random walk successful.")
                 path.coordinates = coordinates[: self.count]
                 path.beads = beads[: self.count]
+                if self.cell_list is not None:
+                    self.cell_list.commit()
             else:
                 logger.warning("Random walk not successful.")
                 logger.warning(self.termination.summarize())
+                if self.cell_list is not None:
+                    self.cell_list.rollback()
                 return True
             # RW is terminated and successful, update bond graph
             self.termination._clean()
