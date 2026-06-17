@@ -46,11 +46,11 @@ def _check_path_split_kernel(points, candidates, min_sq_dist, pbc, box_lengths, 
     dz = points[point_i, 2] - candidates[cand_i, 2]
     # Minimum image convention on periodic axes
     if pbc[0]:
-        dx -= np.round(dx / box_lengths[0]) * box_lengths[0]
+        dx -= box_lengths[0] * math.floor(dx / box_lengths[0] + 0.5)
     if pbc[1]:
-        dy -= np.round(dy / box_lengths[1]) * box_lengths[1]
+        dy -= box_lengths[1] * math.floor(dy / box_lengths[1] + 0.5)
     if pbc[2]:
-        dz -= np.round(dz / box_lengths[2]) * box_lengths[2]
+        dz -= box_lengths[2] * math.floor(dz / box_lengths[2] + 0.5)
     dist_sq = dx * dx + dy * dy + dz * dz
 
     if dist_sq < min_sq_dist:
@@ -70,11 +70,11 @@ def _target_sq_distances_kernel(
     dy = target_coordinate[1] - new_points[i, 1]
     dz = target_coordinate[2] - new_points[i, 2]
     if pbc[0]:
-        dx -= np.round(dx / box_lengths[0]) * box_lengths[0]
+        dx -= box_lengths[0] * math.floor(dx / box_lengths[0] + 0.5)
     if pbc[1]:
-        dy -= np.round(dy / box_lengths[1]) * box_lengths[1]
+        dy -= box_lengths[1] * math.floor(dy / box_lengths[1] + 0.5)
     if pbc[2]:
-        dz -= np.round(dz / box_lengths[2]) * box_lengths[2]
+        dz -= box_lengths[2] * math.floor(dz / box_lengths[2] + 0.5)
     sq_distances[i] = dx * dx + dy * dy + dz * dz
 
 
