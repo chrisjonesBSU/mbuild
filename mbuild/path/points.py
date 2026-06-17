@@ -80,6 +80,8 @@ def get_second_point(state, existing_points, beads, check_path, next_step):
             new_point=xyz,
             radius=state.radius,
             tolerance=state.tolerance,
+            pbc=state.pbc,
+            box_lengths=state.box_lengths,
         ):
             return xyz
     return None
@@ -90,13 +92,13 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
 
     The strategy for choosing a starting point depends on ``state.initial_point``:
 
-    - **np.ndarray (3,)**: the array is used directly as the starting coordinate.
-    - **int**: treated as an index into ``existing_points``; a new point is
+    - np.ndarray (3,): the array is used directly as the starting coordinate.
+    - int: treated as an index into ``existing_points``; a new point is
       generated in a sphere around that coordinate, filtered by volume
       constraint and bias, and checked for overlaps.
-    - **None with volume_constraint**: candidates are sampled from the volume
+    - None with volume_constraint: candidates are sampled from the volume
       constraint's low-density regions and checked for overlaps.
-    - **None without volume_constraint**: candidates are drawn uniformly at
+    - None without volume_constraint: candidates are drawn uniformly at
       random within the bounding box of ``existing_points`` (or a unit sphere
       around the origin if no points exist yet) and checked for overlaps.
 
@@ -157,6 +159,8 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
             new_point=state.initial_point,
             radius=state.radius,
             tolerance=state.tolerance,
+            pbc=state.pbc,
+            box_lengths=state.box_lengths,
         ):
             return state.initial_point
         raise PathConvergenceError(
@@ -219,6 +223,8 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
                 new_point=xyz,
                 radius=state.radius,
                 tolerance=state.tolerance,
+                pbc=state.pbc,
+                box_lengths=state.box_lengths,
             ):
                 return xyz
         raise PathConvergenceError(
@@ -238,6 +244,8 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
                 new_point=xyz,
                 radius=state.radius,
                 tolerance=state.tolerance,
+                pbc=state.pbc,
+                box_lengths=state.box_lengths,
             ):
                 return xyz
         raise PathConvergenceError(
@@ -260,6 +268,8 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
                 new_point=xyz,
                 radius=state.radius,
                 tolerance=state.tolerance,
+                pbc=state.pbc,
+                box_lengths=state.box_lengths,
             ):
                 return xyz
         raise PathConvergenceError(

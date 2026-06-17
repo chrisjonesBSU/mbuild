@@ -975,12 +975,14 @@ def hard_sphere_random_walk(
     rng = np.random.default_rng(seed + len(path.coordinates))
     state.rng = rng
 
-    # Set up PBC info from volume constraints
+    # Set up PBC info from volume constraints cast to numba-safe arrays
     if isinstance(volume_constraint, CuboidConstraint):
-        pbc = volume_constraint.pbc
+        pbc = np.asarray(volume_constraint.pbc, dtype=np.bool_)
         box_lengths = volume_constraint.box_lengths.astype(np.float32)
     elif isinstance(volume_constraint, CylinderConstraint):
-        pbc = (False, False, volume_constraint.periodic_height)
+        pbc = np.array(
+            [False, False, volume_constraint.periodic_height], dtype=np.bool_
+        )
         box_lengths = np.array(
             [
                 volume_constraint.radius * 2,
@@ -989,8 +991,10 @@ def hard_sphere_random_walk(
             ]
         ).astype(np.float32)
     else:
-        pbc = (None, None, None)
-        box_lengths = (None, None, None)
+        pbc = np.array([False, False, False], dtype=np.bool_)
+        box_lengths = np.array([np.inf, np.inf, np.inf], dtype=np.float32)
+    state.pbc = pbc
+    state.box_lengths = box_lengths
 
     # Set up bias conditions
     if bias:
@@ -1148,6 +1152,8 @@ def hard_sphere_random_walk(
                     new_point=xyz,
                     radius=radius,
                     tolerance=tolerance,
+                    pbc=pbc,
+                    box_lengths=box_lengths,
                 ):
                     accept_xyz = xyz
                     break
@@ -1178,10 +1184,8 @@ def hard_sphere_random_walk(
 class RandomWalkState:
     """Tracks state and configuration for a hard_sphere_random_walk.
 
-
     This class encapsulates all the bookkeeping information needed during
     a random walk, keeping the Path object clean of implementation details.
-
 
     Attributes
     ----------
@@ -1296,6 +1300,10 @@ class RandomWalkState:
         self.attempts = 0
         self.start_time = None
         self.gpu_static_points = None
+        # PBC info for overlap checks; populated in hard_sphere_random_walk.
+        # Defaults reproduce non-periodic behavior.
+        self.pbc = np.array([False, False, False], dtype=np.bool_)
+        self.box_lengths = np.array([np.inf, np.inf, np.inf], dtype=np.float32)
 
     def check_termination(self, path, coordinates, beads):
         """Examine and process termination if we have reached.
