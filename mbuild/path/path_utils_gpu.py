@@ -27,7 +27,7 @@ def _norm(vec):
 
 
 @cuda.jit
-def _check_path_split_kernel(points, candidates, min_sq_dist, valid):
+def _check_path_split_kernel(points, candidates, min_sq_dist, pbc, box_lengths, valid):
     """Check candidates against points. Sets valid[i]=0 if candidate i contains overlaps."""
     cand_i = cuda.blockIdx.x
     point_i = cuda.threadIdx.x + cuda.blockIdx.y * cuda.blockDim.x
@@ -44,6 +44,13 @@ def _check_path_split_kernel(points, candidates, min_sq_dist, valid):
     dx = points[point_i, 0] - candidates[cand_i, 0]
     dy = points[point_i, 1] - candidates[cand_i, 1]
     dz = points[point_i, 2] - candidates[cand_i, 2]
+    # Minimum image convention on periodic axes
+    if pbc[0]:
+        dx -= np.round(dx / box_lengths[0]) * box_lengths[0]
+    if pbc[1]:
+        dy -= np.round(dy / box_lengths[1]) * box_lengths[1]
+    if pbc[2]:
+        dz -= np.round(dz / box_lengths[2]) * box_lengths[2]
     dist_sq = dx * dx + dy * dy + dz * dz
 
     if dist_sq < min_sq_dist:
@@ -112,7 +119,15 @@ def _target_density_kernel(candidates, target_coords, r2_cut, out):
         out[cand_i] = np.float32(total)
 
 
-def check_path_split(d_static_points, dynamic_points, candidates, radius, tolerance):
+def check_path_split(
+    d_static_points,
+    dynamic_points,
+    candidates,
+    radius,
+    tolerance,
+    pbc=None,
+    box_lengths=None,
+):
     """GPU version of path_utils.py check_path().
     Coordinates are split between static and dynamic coordinates.
     Static coordinates which are all of the coorindates from previous paths and/or includex compounds.
@@ -133,12 +148,21 @@ def check_path_split(d_static_points, dynamic_points, candidates, radius, tolera
         Site radius.
     tolerance : float
         Tolerance for overlap checks.
+    pbc : array of bool, optional
+        Periodic axes. Defaults to non-periodic on all three axes.
+    box_lengths : array of float, optional
+        Box length per axis. Defaults to inf (no wrap).
 
     Returns
     -------
     numpy array of bool
         Mask where True = candidate is valid (no overlaps).
     """
+    if pbc is None:
+        pbc = np.array([False, False, False], dtype=bool)
+    if box_lengths is None:
+        box_lengths = np.array([np.inf, np.inf, np.inf], dtype=np.float32)
+
     candidates = np.asarray(candidates, dtype=np.float32)
     dynamic_points = np.asarray(dynamic_points, dtype=np.float32)
     min_sq_dist = np.float32(radius - tolerance) ** np.float32(2.0)
@@ -154,6 +178,8 @@ def check_path_split(d_static_points, dynamic_points, candidates, radius, tolera
     valid = np.ones(n_candidates, dtype=np.int32)
     d_valid = cuda.to_device(valid)
     d_candidates = cuda.to_device(candidates)
+    d_pbc = cuda.to_device(np.asarray(pbc, dtype=bool))
+    d_box = cuda.to_device(np.asarray(box_lengths, dtype=np.float32))
 
     threads_per_block = 256
 
@@ -162,7 +188,7 @@ def check_path_split(d_static_points, dynamic_points, candidates, radius, tolera
         blocks_y = (n_static + threads_per_block - 1) // threads_per_block
         blocks = (n_candidates, blocks_y)
         _check_path_split_kernel[blocks, threads_per_block](
-            d_static_points, d_candidates, min_sq_dist, d_valid
+            d_static_points, d_candidates, min_sq_dist, d_pbc, d_box, d_valid
         )
 
     # Check against dynamic points (transfer to GPU)
@@ -171,7 +197,7 @@ def check_path_split(d_static_points, dynamic_points, candidates, radius, tolera
         blocks_y = (n_dynamic + threads_per_block - 1) // threads_per_block
         blocks = (n_candidates, blocks_y)
         _check_path_split_kernel[blocks, threads_per_block](
-            d_dynamic, d_candidates, min_sq_dist, d_valid
+            d_dynamic, d_candidates, min_sq_dist, d_pbc, d_box, d_valid
         )
 
     # Copy result back
