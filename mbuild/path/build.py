@@ -1027,7 +1027,6 @@ def hard_sphere_random_walk(
     # Select methods for random walk
     if state.run_on_gpu:
         from mbuild.path.path_utils_gpu import check_path_split
-
         logger.info("Running hard_sphere_random_walk on a CUDA device.")
         check_path_gpu = check_path_split
     else:
