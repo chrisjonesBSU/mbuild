@@ -11,6 +11,10 @@ from mbuild.exceptions import PathConvergenceError
 from mbuild.path.build import Path
 from mbuild.path.constraints import CuboidConstraint, CylinderConstraint
 
+# Cap on feasible candidates collected per crosslink. crosslink() places the
+# first that works, so extras are just fallbacks; larger = slower scan.
+_PAIRWISE_CAP = 32
+
 # =============================================================================
 # CrosslinkerGeometry
 # =============================================================================
@@ -546,6 +550,14 @@ def _can_reach_all_beads(
         offset = np.array([0.0, 0.0, crosslink_bond_length], dtype=np.float64)
         return True, (bead_positions[0] + offset).astype(np.float32)
 
+    # No point is within r of every bead unless all beads lie within 2r of each
+    # other (triangle inequality). Reject before the expensive solver runs.
+    max_reach = crosslink_bond_length * (1.0 + tolerance)
+    diffs = bead_positions[:, None, :] - bead_positions[None, :, :]
+    max_pair_dist = np.sqrt((diffs * diffs).sum(axis=-1)).max()
+    if max_pair_dist > 2.0 * max_reach:
+        return False, None
+
     centroid = bead_positions.mean(axis=0)
     spread = bead_positions - centroid
     principal = (
@@ -750,10 +762,9 @@ def _pairwise_candidate_search(
             # No overlap between groups
             if set(group_b) & set(group_a):
                 continue
-            # Exclusion zone
+            # Exclusion zone. Bond distance is symmetric, so testing group_b
+            # against excluded_a covers the reverse BFS from group_b too.
             if set(group_b) & excluded_a:
-                continue
-            if set(group_a) & _get_excluded_indices(path, group_b, excluded_bond_depth):
                 continue
 
             # --- Geometric feasibility check ---
@@ -786,7 +797,7 @@ def _pairwise_candidate_search(
             if feasible:
                 candidates.append([group_a, group_b])
 
-            if len(candidates) >= 200:
+            if len(candidates) >= _PAIRWISE_CAP:
                 return candidates
 
     return candidates
@@ -1332,36 +1343,53 @@ def _try_placement_with_rotations(
         return base_coords
 
     # --- Need rotational search to avoid overlaps ---
-    # For single-site crosslinkers, rotation doesn't help
-    if crosslinker.n_sites == 1:
-        return None
-
     # Determine rotation axis
     unique_nodes = list(target_node_positions.keys())
     centroid = base_coords.mean(axis=0)
 
-    if len(unique_nodes) >= 2:
+    if crosslinker.n_sites == 1:
+        # A lone bead has a circle (2 targets) or sphere (1 target) of valid
+        # positions; rotate it about its backbone beads to find a free spot.
+        node = unique_nodes[0]
+        bead_indices = []
+        for conn_idx, phys_node in enumerate(crosslinker.connection_sites):
+            if phys_node == node:
+                bead_indices.extend(candidate_group[conn_idx])
+
+        # Unwrap backbone positions relative to the first (PBC).
+        ref = path_coords[bead_indices[0]].astype(np.float64)
+        bb_positions = np.array(
+            [
+                ref + _pbc_delta(path_coords[i], ref, box_lengths, pbc)
+                for i in bead_indices
+            ],
+            dtype=np.float64,
+        )
+        pivot = bb_positions.mean(axis=0)
+        if len(bb_positions) >= 2:
+            # Line through the targets: rotation preserves both bond lengths.
+            axis = bb_positions[-1] - bb_positions[0]
+        else:
+            # One target: rotate about a perpendicular to sweep its sphere.
+            axis = _get_perpendicular(base_coords[node] - pivot)
+    elif len(unique_nodes) >= 2:
         # Rotate around axis connecting the physical nodes
         positions = np.array([target_node_positions[n] for n in unique_nodes])
         axis = positions[-1] - positions[0]
+        pivot = positions.mean(axis=0)
     elif len(unique_nodes) == 1:
         # Rotate around the axis from centroid to the single physical node
         axis = target_node_positions[unique_nodes[0]] - centroid
+        pivot = target_node_positions[unique_nodes[0]]
     else:
         axis = np.array([0, 0, 1], dtype=np.float32)
+        pivot = centroid
 
     axis_norm = np.linalg.norm(axis)
     if axis_norm < 1e-10:
         axis = np.array([0, 0, 1], dtype=np.float32)
     else:
         axis = axis / axis_norm
-
-    # Rotation pivot: the physical node(s) must stay fixed
-    # Rotate around the axis through the centroid of physical nodes
-    if len(unique_nodes) >= 1:
-        pivot = np.mean([target_node_positions[n] for n in unique_nodes], axis=0)
-    else:
-        pivot = centroid
 
     best_coords = None
     best_error = float("inf")
