@@ -442,12 +442,17 @@ def _get_excluded_indices(path, node_indices, excluded_bond_depth):
 def _get_perpendicular(v):
     """Return a unit vector perpendicular to v."""
     v = np.asarray(v, dtype=np.float64)
-    if abs(v[0]) < 0.9:
-        perp = np.cross(v, [1, 0, 0])
-    else:
-        perp = np.cross(v, [0, 1, 0])
-    norm = np.linalg.norm(perp)
-    return (perp / max(norm, 1e-10)).astype(np.float32)
+    norm = np.linalg.norm(v)
+    if norm < 1e-10:
+        # Degenerate input has no defined direction; any perpendicular will do.
+        return np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    v = v / norm
+    # Cross with whichever axis is least aligned with v so the result is never
+    # near-zero (crossing with a near-parallel axis collapses to ~0).
+    axis = np.zeros(3)
+    axis[np.argmin(np.abs(v))] = 1.0
+    perp = np.cross(v, axis)
+    return (perp / np.linalg.norm(perp)).astype(np.float32)
 
 
 # =============================================================================
@@ -549,6 +554,19 @@ def _can_reach_all_beads(
     if n == 1:
         offset = np.array([0.0, 0.0, crosslink_bond_length], dtype=np.float64)
         return True, (bead_positions[0] + offset).astype(np.float32)
+
+    # Unwrap beads into a single periodic image (reference = first bead) so the
+    # Euclidean distances below are minimum-image correct for groups straddling
+    # a box face. Idempotent for already-unwrapped input.
+    if np.any(pbc) and np.any(np.asarray(box_lengths) > 0):
+        reference = bead_positions[0].copy()
+        bead_positions = np.array(
+            [
+                reference + _pbc_delta(b, reference, box_lengths, pbc)
+                for b in bead_positions
+            ],
+            dtype=np.float64,
+        )
 
     # No point is within r of every bead unless all beads lie within 2r of each
     # other (triangle inequality). Reject before the expensive solver runs.
@@ -1504,7 +1522,8 @@ def crosslink(
     path : Path
         The Path object to modify in place.
     crosslinker : CrosslinkerGeometry, optional
-        If None, auto-generated from bead_name and n_connection_sites.
+        If None, defaults to CrosslinkerGeometry.single_site() (one bead
+        bridging two backbone beads).
     backbone_name : str or tuple
         Specifies what each connection site bonds to:
         - String: every connection site bonds to one bead of that type.
