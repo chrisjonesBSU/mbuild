@@ -7,7 +7,7 @@ import numpy as np
 from mbuild.utils.io import import_
 
 
-def visualize_path(path, radius=0.1, hide_periodic_bonds=False):
+def visualize_path(path, radius=0.1, hide_periodic_bonds=False, width=600, height=600):
     """Visualize in 3D space using py3Dmol of the Path as a Compound.
 
     Parameters
@@ -29,11 +29,7 @@ def visualize_path(path, radius=0.1, hide_periodic_bonds=False):
         print(f"Hiding {len(remove_edges)} periodic edges")
         G.remove_edges_from(remove_edges)
 
-    view = py3Dmol.view(width=600, height=600)
-    # view.addModel(mol2_string, "mol2", keepH=True)
-
-    # Get unique bead names
-    unique_names = list(dict.fromkeys(node for node in path.beads))
+    view = py3Dmol.view(width=width, height=height)
 
     # Color palette
     colors = [
@@ -61,12 +57,13 @@ def visualize_path(path, radius=0.1, hide_periodic_bonds=False):
         "#000000",
     ]
 
-    data = path.to_mol3000(G)
+    data, unique_beadnames = path.to_mol3000(G)
     view = py3Dmol.view(data=data)
-    for i, name in enumerate(unique_names):
+    for i, name in enumerate(unique_beadnames.values()):
         color = colors[i % len(colors)]
+        label = "R" + str(name)
         view.addStyle(
-            {"elem": name.strip("_")},  # Select all atoms with this name
+            {"elem": label},  # Select all atoms with this name
             {
                 "sphere": {"color": color, "radius": radius, "scale": 0.5},
                 "stick": {"radius": radius / 4, "color": "grey"},

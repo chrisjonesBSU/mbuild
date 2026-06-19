@@ -3,12 +3,13 @@
 import logging
 import math
 import time
+from itertools import combinations_with_replacement
 
 import networkx as nx
 import numpy as np
 from scipy.interpolate import interp1d
 
-from mbuild import Compound
+from mbuild import Box, Compound
 from mbuild.exceptions import PathConvergenceError
 from mbuild.path.constraints import CuboidConstraint, CylinderConstraint
 from mbuild.path.namers import BeadNamer
@@ -24,6 +25,7 @@ from mbuild.path.points import (
     get_second_point,
 )
 from mbuild.path.termination import NumSites, Termination, Terminator
+from mbuild.utils.io import import_
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +56,7 @@ class Path:
         if (
             coordinates is not None
             and bond_graph is not None
-            and isinstance(bead_name, np.ndarray)
+            and isinstance(bead_name, (np.ndarray, list))
         ):
             assert len(coordinates) == len(bond_graph), (
                 len(coordinates),
@@ -66,7 +68,7 @@ class Path:
             )
             self.bond_graph = bond_graph
             self.coordinates = coordinates
-            self.beads = bead_name.astype("U10")
+            self.beads = np.array(bead_name, dtype="U10")
         # Passing in an array of coordinates, bond graph, and single bead name
         elif coordinates is not None and bond_graph is not None:
             assert len(coordinates) == len(bond_graph)
@@ -93,8 +95,8 @@ class Path:
             if isinstance(bead_name, str):
                 self.beads = np.array([bead_name for _ in coordinates], dtype="U10")
             # Passed array of bead names, cast to U10 dtype
-            elif isinstance(bead_name, np.ndarray):
-                self.beads = bead_name.astype("U10")
+            elif isinstance(bead_name, (np.ndarray, list)):
+                self.beads = np.array(bead_name, dtype="U10")
             for idx in range(len((self.coordinates))):
                 self.bond_graph.add_node(idx)
         # Nothing is defined, create empty place holders for coords, bond graph and bead names
@@ -113,17 +115,21 @@ class Path:
     def __add__(self, other):
         coordinates = np.concat((self.coordinates, other.coordinates))
         beads = np.concat((self.beads, other.beads))
-        bond_graph = nx.compose(
+        bond_graph = nx.disjoint_union(
             self.bond_graph, other.bond_graph
         )  # TODO: Don't overwrite nodes in bg
         return Path(coordinates, bond_graph, beads)
+
+    def __len__(self):
+        return len(self.coordinates)
 
     @classmethod
     def from_compound(cls, compound):
         coordinates = compound.xyz
 
         # Create the path with coordinates and bond graph
-        path = cls(coordinates=coordinates, bead_name=compound.name)
+        bead_names = ["_" + part.name for part in compound.particles()]
+        path = cls(coordinates=coordinates, bead_name=bead_names)
         path.bond_graph = nx.Graph()
 
         # Ensure all nodes have xyz and name attributes
@@ -267,7 +273,7 @@ class Path:
 
     def add_edge(self, u, v):
         """Add an edge to the Path's bond graph."""
-        bond_vec = self.coordinates[v] - self.coordinates[u]
+        bond_vec = (self.coordinates[v] - self.coordinates[u]).astype(float)
         bond_length = np.linalg.norm(bond_vec)
         bond_vec /= bond_length
         self.bond_graph.add_edge(
@@ -319,13 +325,16 @@ class Path:
 
         return _to_mol(self)
 
-    def to_mol3000(self):
+    def to_mol3000(self, G=None):
         """Convert mBuild Path to SDF/MOL V3000 format."""
         from mbuild.path.formats import to_mol3000 as _to_mol3000
 
-        return _to_mol3000(self)
+        if G is None:
+            G = self.bond_graph
 
-    def visualize(self, radius, hide_periodic_bonds=False):
+        return _to_mol3000(self, G)
+
+    def visualize(self, radius, hide_periodic_bonds=False, width=600, height=600):
         """Visualize a path with py3Dmol.
 
         Parameters
@@ -337,19 +346,36 @@ class Path:
         """
         from mbuild.utils.visualize import visualize_path
 
-        return visualize_path(self, radius, hide_periodic_bonds)
+        return visualize_path(self, radius, hide_periodic_bonds, width, height)
 
-    def relax(self, bead_radius, bond_length=None, steps=1000, seed=1, nthreads=1):
-        """Perform a dpd simulation to relax the current path.
+    def relax(
+        self, radius, bonds=None, angles=None, box=None, steps=1000, seed=1, nthreads=1
+    ):
+        """Perform an OpenMM simulation to relax the current path.
 
         Runs a short energy minimization simulation in OpenMM.
 
         Parameters
         ----------
-        bead_radius : float
-            Bead size set in the simulation.
-        bond_length : float, optional
-            Bond length used for all bonds.
+        radius : float or dictionary
+            Bead sigma size set in the simulation in nm.
+            If a dict is passed key="bead_name" and value is float in nm for the given bead radius.
+        bonds : float or dictionary or string, optional
+            Bond lengths used for all bonds.
+            If a dictionary is passed, key=(bead_name, bead_name) and
+            value is {'r': float, 'k': float}. r is in units of nm and k is in units of kcal/nm**2.
+            If a float is passed, that is set as r in nanometers for a harmonic bond.
+            If 'constrain' is passed, then bonds are constrained.
+            If None is passed, then no harmonic bond forces are applied..
+        angles : float or dictionary or string, optional
+            Harmonic angle forces used for all angles.
+            If a dictionary is passed, key=(bead_name, central_bead_name, bead_name) and
+            value is {'theta': float, 'k': float}. r is in units of nm and k is in units of degrees.
+            If a float is passed, that is set as theta in degress for a harmonic angle.
+            If 'constrain' is passed, then angles are constrained.
+            If None is passed, no angle force is used.
+        box : mb.Box, optional
+            Box to use for periodic boundaries.
         steps : int, optional, default 1,000
             Number of simulation steps to run.
         seed : int, optional, default 1
@@ -359,8 +385,274 @@ class Path:
         """
         from mbuild.simulation import energy_minimize_path
 
-        energy_minimize_path(self, bead_radius, bond_length, steps, seed, nthreads)
+        energy_minimize_path(self, radius, bonds, angles, box, steps, seed, nthreads)
         return
+
+    def print_bond_lengths(self, box=None):
+        """Compute and return info about path bonds.
+
+        Parameters
+        ----------
+        box : list, optional
+            list of [Lx, Ly, Lz] to use for checking for periodic bonds. Assume centered at (0,0,0)
+
+        Returns
+        -------
+        bonds : dict
+            Dictionary mapping (i, center, k) tuples to their angles in nm.
+        bonds_typesDict : dict
+            Dictionary mapping sorted bead-type tuples to lists of bonds.
+        """
+        positions = self.coordinates
+        bond_lengths = {}
+        beads = set(self.beads)
+        bond_types = list(combinations_with_replacement(beads, 2))
+        bond_typesDict = {
+            tuple(sorted((str(b1), str(b2)))): [] for b1, b2 in bond_types
+        }
+
+        for i, j in self.bond_graph.edges():
+            delta = positions[j] - positions[i]
+            if isinstance(box, CuboidConstraint):
+                box_arr = box.box_lengths
+                delta -= np.round(delta / box_arr) * box_arr
+            elif isinstance(box, Box):
+                box_arr = box.lengths
+                delta -= np.round(delta / box_arr) * box_arr
+            elif isinstance(box, list):
+                box_arr = np.array(box)
+                delta -= np.round(delta / box_arr) * box_arr
+            bl = np.linalg.norm(delta)
+            bond_lengths[(i, j)] = bl
+            bond_name = tuple(sorted((str(self.beads[i]), str(self.beads[j]))))
+            bond_typesDict[bond_name].append(bl)
+
+        # Summary stats
+        print(f"Min bond length: {min(bond_lengths.values()):.4f}")
+        print(f"Max bond length: {max(bond_lengths.values()):.4f}")
+        print(f"Mean bond length: {np.mean(list(bond_lengths.values())):.4f}")
+        for key in bond_typesDict:
+            if not len(bond_typesDict[key]):
+                continue
+            print(
+                f"{key}: Max={max(bond_typesDict[key]):.2f}, Min={min(bond_typesDict[key]):.2f}"
+            )
+
+        return bond_lengths, bond_typesDict
+
+    def print_angle_lengths(self, box=None):
+        """Compute and return info about path angles.
+
+        Parameters
+        ----------
+        box : array-like of shape (3,), optional
+            Box dimensions [Lx, Ly, Lz]. If None, no periodic wrapping is applied.
+
+        Returns
+        -------
+        angles : dict
+            Dictionary mapping (i, center, k) tuples to their angles in degrees.
+        angle_typesDict : dict
+            Dictionary mapping sorted bead-type tuples to lists of angles.
+        """
+        from itertools import combinations, combinations_with_replacement
+
+        positions = self.coordinates
+        angles = {}
+        beads = set(self.beads)
+
+        # Build angle type keys: (outer, center, outer) with outer pair sorted
+        angle_types = set()
+        for center_bead in beads:
+            for b1, b2 in combinations_with_replacement(beads, 2):
+                angle_types.add((str(b1), str(center_bead), str(b2)))
+        angle_typesDict = {key: [] for key in angle_types}
+
+        for center_node in self.bond_graph.nodes():
+            neighbors = list(self.bond_graph.neighbors(center_node))
+            if len(neighbors) < 2:
+                continue
+
+            for i_node, k_node in combinations(neighbors, 2):
+                # Vector from center to i
+                delta_i = positions[i_node] - positions[center_node]
+                if box is not None:
+                    box_arr = np.array(box)
+                    delta_i -= np.round(delta_i / box_arr) * box_arr
+
+                # Vector from center to k
+                delta_k = positions[k_node] - positions[center_node]
+                if box is not None:
+                    delta_k -= np.round(delta_k / box_arr) * box_arr
+
+                # Compute angle via dot product
+                cos_angle = np.dot(delta_i, delta_k) / (
+                    np.linalg.norm(delta_i) * np.linalg.norm(delta_k)
+                )
+                cos_angle = np.clip(cos_angle, -1.0, 1.0)
+                angle_deg = np.degrees(np.arccos(cos_angle))
+
+                angles[(i_node, center_node, k_node)] = angle_deg
+
+                # Categorize by type (sort outer beads for consistency)
+                outer_beads = tuple(
+                    sorted((str(self.beads[i_node]), str(self.beads[k_node])))
+                )
+                center_bead = str(self.beads[center_node])
+                angle_key = (outer_beads[0], center_bead, outer_beads[1])
+                angle_typesDict[angle_key].append(angle_deg)
+
+        # Summary stats
+        print(f"Min angle: {min(angles.values()):.2f}°")
+        print(f"Max angle: {max(angles.values()):.2f}°")
+        print(f"Mean angle: {np.mean(list(angles.values())):.2f}°")
+        for key in angle_typesDict:
+            if not len(angle_typesDict[key]):
+                continue
+            print(
+                f"{key}: Max={max(angle_typesDict[key]):.2f}°, Min={min(angle_typesDict[key]):.2f}°, Mean={np.mean(angle_typesDict[key]):.2f}°"
+            )
+
+        return angles, angle_typesDict
+
+    def freud_rdf(self, box=None, bins=50, r_max=1):
+        freud = import_("freud")
+        if box is None:
+            box = np.array([np.inf, np.inf, np.inf, 0, 0, 0])  # infinite box
+        elif isinstance(box, Box):
+            box = np.array([*box.lengths, 0, 0, 0])
+        elif len(box) == 3:
+            box = np.array([*box, 0, 0, 0])  # assume orthorhombic
+
+        rdf = freud.density.RDF(bins=bins, r_max=r_max)
+        rdf.compute(system=(box, self.coordinates))
+        return rdf
+
+    def replace_sites(
+        self,
+        replacement,
+        sites=None,
+        bead_name=None,
+        bond_length=None,
+        tolerance=0.1,
+        volume_constraint=None,
+        n_rotation_samples=36,
+        overlap_radius=None,
+        seed=42,
+    ):
+        """Replace sites in this Path with a multi-site substructure, in place.
+
+        Uses rigid-body alignment to guarantee bond lengths from connection
+        sites to neighbors.
+
+        Parameters
+        ----------
+        replacement : CrosslinkerGeometry
+            The replacement structure.
+        sites : list of int, optional
+            Node indices to replace.
+        bead_name : str, optional
+            Replace all sites matching this name.
+        bond_length : float, optional
+            Desired bond length from connection sites to neighbors.
+            If None, preserves existing distances.
+        tolerance : float, default 0.1
+            Fractional tolerance on bond lengths.
+        volume_constraint : optional
+            For periodic boundary handling.
+        n_rotation_samples : int, default 36
+            Angular samples for overlap minimization.
+        overlap_radius : float, optional
+            Radius for overlap detection.
+        seed : int, default 42
+
+        Returns
+        -------
+        Path
+            self (modified in place).
+        """
+        from mbuild.path.crosslink import replace_sites
+
+        return replace_sites(
+            self,
+            replacement=replacement,
+            sites=sites,
+            bead_name=bead_name,
+            bond_length=bond_length,
+            tolerance=tolerance,
+            volume_constraint=volume_constraint,
+            n_rotation_samples=n_rotation_samples,
+            overlap_radius=overlap_radius,
+            seed=seed,
+        )
+
+    def crosslink(
+        self,
+        crosslinker=None,
+        bead_name="_R",
+        backbone_name="_A",
+        radius=0.1,
+        excluded_bond_depth=2,
+        n_connection_sites=2,
+        volume_constraint=None,
+        initial_point=None,
+        seed=42,
+        chunk_size=512,
+        run_on_gpu=False,
+        n_rotation_samples=36,
+        overlap_radius=None,
+    ):
+        """Add a crosslink to this path. See module-level crosslink() for details."""
+        from mbuild.path.crosslink import crosslink as crosslink2
+
+        return crosslink2(
+            self,
+            crosslinker=crosslinker,
+            bead_name=bead_name,
+            backbone_name=backbone_name,
+            radius=radius,
+            excluded_bond_depth=excluded_bond_depth,
+            n_connection_sites=n_connection_sites,
+            volume_constraint=volume_constraint,
+            initial_point=initial_point,
+            seed=seed,
+            chunk_size=chunk_size,
+            run_on_gpu=run_on_gpu,
+            n_rotation_samples=n_rotation_samples,
+            overlap_radius=overlap_radius,
+        )
+
+    def wrap_inside_box(self, constraint):
+        """
+        Wrap coordinates inside a cubic box constraint with periodic boundary conditions.
+
+        Args:
+            coordinates: ndarray of shape (N, 3) with 3D coordinates
+            box_length: length of the cubic box
+            center: center of the box as tuple (x, y, z)
+            pbc: tuple of booleans indicating PBC for each dimension (x, y, z)
+
+        Returns:
+            ndarray of wrapped coordinates with same shape as input
+        """
+        coordinates = np.array(self.coordinates, dtype=float)
+        wrapped = coordinates.copy()
+        center = np.array(constraint.center)
+        pbc = constraint.pbc
+
+        # Calculate box bounds relative to center
+        half_lengths = constraint.box_lengths / 2.0
+        box_min = center - half_lengths
+        box_max = center + half_lengths
+
+        # Apply periodic boundary conditions to each dimension
+        for dim in range(3):
+            if pbc[dim]:
+                # Shift coordinates to box range and wrap using modulo
+                shifted = wrapped[:, dim] - box_min[dim]
+                wrapped[:, dim] = (shifted % constraint.box_lengths[dim]) + box_min[dim]
+
+        self.coordinates = wrapped
 
 
 def lamellar(
@@ -916,7 +1208,7 @@ def hard_sphere_random_walk(
     radius : float, default 0.1 nm
         Radius of sites used in checking for overlaps.
     rw_angles : tuple or dict or np.array or AnglesSampler, default None
-        Set the angle sampling method. A tuple of (min_val, max_val) sets the uniform distribution.
+        Set the angle sampling method in units of radians. A tuple of (min_val, max_val) sets the uniform distribution.
         The default value of None sets the uniform angle sampling from (np.pi/2, np.pi). Can also
         use a Gaussian distribution by passing a dict with keys {'loc':mean, 'scale':std}.
         Finally, a numpy array of 1D or 2D array of numpy values can be passed, which will be sampled
@@ -1125,9 +1417,7 @@ def hard_sphere_random_walk(
         )
         # Create mask for particles inside volume constraint, allows for PBC
         if state.volume_constraint:
-            is_inside_mask = volume_constraint.is_inside(
-                points=candidates, buffer=radius
-            )
+            is_inside_mask = volume_constraint.is_inside(points=candidates, buffer=0.0)
             candidates = candidates[is_inside_mask]
         # If there is a bias, sort candidates according to the bias
         if state.bias:
@@ -1163,7 +1453,9 @@ def hard_sphere_random_walk(
             # Iterate through current state of candidates, break after first accept
             for xyz in candidates:
                 if check_path_cpu(
-                    existing_points=existing_points,
+                    existing_points=existing_points[
+                        :-1
+                    ],  # skip previously bonded to coordinate
                     new_point=xyz,
                     radius=radius,
                     tolerance=tolerance,
@@ -1262,10 +1554,6 @@ class RandomWalkState:
     ):
         self.bond_length = bond_length
         self.radius = radius
-        if bond_length < radius:
-            raise ValueError(
-                "Bond length should be greater than radius to prevent overlaps."
-            )
         if angles_sampler is None:
             self.angles = AnglesSampler(
                 "uniform", {"low": np.pi / 2, "high": np.pi}, seed
@@ -1546,7 +1834,32 @@ def crosslink(
 
     # Calculate position for new crosslink node (centroid of selected beads)
     selected_coords = np.array(path.coordinates[selected_nodes])
-    crosslink_position = np.mean(selected_coords, axis=0)
+    if volume_constraint is not None:
+        # Unwrap all selected coords relative to the first one
+        ref = selected_coords[0]
+        unwrapped = np.empty_like(selected_coords)
+        unwrapped[0] = ref
+        for k in range(1, len(selected_coords)):
+            delta = selected_coords[k] - ref
+            if pbc[0]:
+                delta[0] -= np.round(delta[0] / box_lengths[0]) * box_lengths[0]
+            if pbc[1]:
+                delta[1] -= np.round(delta[1] / box_lengths[1]) * box_lengths[1]
+            if pbc[2]:
+                delta[2] -= np.round(delta[2] / box_lengths[2]) * box_lengths[2]
+            unwrapped[k] = ref + delta
+
+        crosslink_position = np.mean(unwrapped, axis=0)
+
+        # Wrap back into box [-box/2, box/2]
+        for dim in range(3):
+            if pbc[dim]:
+                crosslink_position[dim] -= (
+                    np.round(crosslink_position[dim] / box_lengths[dim])
+                    * box_lengths[dim]
+                )
+    else:
+        crosslink_position = np.mean(selected_coords, axis=0)
 
     # Add new node to path
     path.append_coordinates(crosslink_position, bead_name)
