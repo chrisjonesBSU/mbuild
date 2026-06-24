@@ -263,3 +263,226 @@ def find_candidates_within_radius(
         within_radius[i] = dist2 <= r2_cut
 
     return within_radius
+
+
+@njit(cache=True, fastmath=True)
+def _sym_eig_3x3(a00, a01, a02, a11, a12, a22):
+    """Eigen-decomposition of a symmetric 3x3 matrix via cyclic Jacobi rotations.
+
+    Returns eigenvalues sorted ascending together with the matching eigenvectors
+    as the *columns* of V. Self-contained (no LAPACK), so it stays numba
+    nopython friendly. A handful of sweeps is plenty for a 3x3.
+
+    Parameters
+    ----------
+    a00, a01, a02, a11, a12, a22 : float
+        The six unique entries of the symmetric matrix.
+
+    Returns
+    -------
+    ev : np.ndarray (3,) float64
+        Eigenvalues, ascending.
+    V : np.ndarray (3, 3) float64
+        Eigenvectors; column k matches ev[k].
+    """
+    A = np.empty((3, 3))
+    A[0, 0] = a00
+    A[0, 1] = a01
+    A[0, 2] = a02
+    A[1, 0] = a01
+    A[1, 1] = a11
+    A[1, 2] = a12
+    A[2, 0] = a02
+    A[2, 1] = a12
+    A[2, 2] = a22
+    V = np.zeros((3, 3))
+    V[0, 0] = 1.0
+    V[1, 1] = 1.0
+    V[2, 2] = 1.0
+    for _ in range(50):
+        off = abs(A[0, 1]) + abs(A[0, 2]) + abs(A[1, 2])
+        if off < 1e-14:
+            break
+        for p in range(2):
+            for q in range(p + 1, 3):
+                apq = A[p, q]
+                if abs(apq) < 1e-30:
+                    continue
+                # Jacobi rotation angle that zeros out A[p, q].
+                theta = (A[q, q] - A[p, p]) / (2.0 * apq)
+                t = 1.0 / (abs(theta) + np.sqrt(theta * theta + 1.0))
+                if theta < 0.0:
+                    t = -t
+                c = 1.0 / np.sqrt(t * t + 1.0)
+                s = t * c
+                # A <- J^T A J: rotate columns p, q then rows p, q.
+                for k in range(3):
+                    akp = A[k, p]
+                    akq = A[k, q]
+                    A[k, p] = c * akp - s * akq
+                    A[k, q] = s * akp + c * akq
+                for k in range(3):
+                    apk = A[p, k]
+                    aqk = A[q, k]
+                    A[p, k] = c * apk - s * aqk
+                    A[q, k] = s * apk + c * aqk
+                # Accumulate the rotation into the eigenvector matrix.
+                for k in range(3):
+                    vkp = V[k, p]
+                    vkq = V[k, q]
+                    V[k, p] = c * vkp - s * vkq
+                    V[k, q] = s * vkp + c * vkq
+    ev = np.empty(3)
+    ev[0] = A[0, 0]
+    ev[1] = A[1, 1]
+    ev[2] = A[2, 2]
+    # Sort ascending and carry the eigenvector columns along.
+    order = np.argsort(ev)
+    ev_sorted = np.empty(3)
+    V_sorted = np.empty((3, 3))
+    for new_i in range(3):
+        src = order[new_i]
+        ev_sorted[new_i] = ev[src]
+        for r in range(3):
+            V_sorted[r, new_i] = V[r, src]
+    return ev_sorted, V_sorted
+
+
+@njit(cache=True, fastmath=True)
+def nematic_q_director(bonds, coordinates, center, r_cut):
+    """Local nematic order parameter and director around a point.
+
+    Gathers all bonds whose midpoint lies within ``r_cut`` of ``center``, builds
+    the nematic order tensor Q = <(3/2) u_outer_u - (1/2) I> over their unit
+    vectors, and returns its scalar order S (the largest eigenvalue) and the
+    director (its eigenvector). Because Q is built from u (x) u, parallel and
+    antiparallel bonds contribute identically -- the correct symmetry for
+    nematic/lamellar order. The dominant eigenpair is taken from a full
+    symmetric eigendecomposition (``_sym_eig_3x3``), which avoids the
+    largest-|eigenvalue| sign trap of power iteration on a traceless tensor.
+
+    Parameters
+    ----------
+    bonds : np.ndarray (E, 2) int
+        Index pairs into ``coordinates`` defining bonded sites.
+    coordinates : np.ndarray (M, 3) float32
+        All placed site coordinates.
+    center : np.ndarray (3,) float32
+        Point about which locality is measured (the current chain tip).
+    r_cut : float
+        Locality cutoff; a bond counts if its midpoint is within r_cut of center.
+
+    Returns
+    -------
+    n_local : int
+        Number of bonds found in the neighborhood.
+    s_param : float
+        Scalar nematic order parameter S (largest eigenvalue; 0 if no bonds).
+    director : np.ndarray (3,) float32
+        Unit director (dominant alignment axis); zeros if undefined.
+    """
+    r2 = r_cut * r_cut
+    qxx = 0.0
+    qxy = 0.0
+    qxz = 0.0
+    qyy = 0.0
+    qyz = 0.0
+    qzz = 0.0
+    n_local = 0
+    for e in range(bonds.shape[0]):
+        i = bonds[e, 0]
+        j = bonds[e, 1]
+        # Bond midpoint
+        mx = 0.5 * (coordinates[i, 0] + coordinates[j, 0])
+        my = 0.5 * (coordinates[i, 1] + coordinates[j, 1])
+        mz = 0.5 * (coordinates[i, 2] + coordinates[j, 2])
+        dx = mx - center[0]
+        dy = my - center[1]
+        dz = mz - center[2]
+        if dx * dx + dy * dy + dz * dz > r2:
+            continue
+        # Unit bond vector
+        ux = coordinates[j, 0] - coordinates[i, 0]
+        uy = coordinates[j, 1] - coordinates[i, 1]
+        uz = coordinates[j, 2] - coordinates[i, 2]
+        un = np.sqrt(ux * ux + uy * uy + uz * uz)
+        if un < 1e-12:
+            continue
+        ux /= un
+        uy /= un
+        uz /= un
+        # Accumulate (3/2) u_outer_u - (1/2) I
+        qxx += 1.5 * ux * ux - 0.5
+        qyy += 1.5 * uy * uy - 0.5
+        qzz += 1.5 * uz * uz - 0.5
+        qxy += 1.5 * ux * uy
+        qxz += 1.5 * ux * uz
+        qyz += 1.5 * uy * uz
+        n_local += 1
+
+    director = np.zeros(3, dtype=np.float32)
+    if n_local < 1:
+        return n_local, 0.0, director
+
+    inv = 1.0 / n_local
+    qxx *= inv
+    qxy *= inv
+    qxz *= inv
+    qyy *= inv
+    qyz *= inv
+    qzz *= inv
+
+    # Dominant eigenpair from a full symmetric eigendecomposition (eigenvalues
+    # ascending). The largest eigenvalue is the uniaxial order S; its eigenvector
+    # is the director.
+    ev, V = _sym_eig_3x3(qxx, qxy, qxz, qyy, qyz, qzz)
+    s_param = float(ev[2])
+    director[0] = np.float32(V[0, 2])
+    director[1] = np.float32(V[1, 2])
+    director[2] = np.float32(V[2, 2])
+    return n_local, s_param, director
+
+
+@njit(cache=True, fastmath=True)
+def order_alignment_scores(candidates, tip, director, s_param, target_s):
+    """Score candidates by how their trial bond aligns with the local director.
+
+    For each candidate the trial bond is u = (candidate - tip), normalized. The
+    nematic alignment with the director is (u . director)**2 (squared so parallel
+    and antiparallel score equally). It is scaled by a self-limiting factor
+    max(0, 1 - S / target_s): once the neighborhood reaches the target order the
+    reward vanishes and the walk reverts to noise (amorphous defects).
+
+    Parameters
+    ----------
+    candidates : np.ndarray (N, 3) float32
+    tip : np.ndarray (3,) float32
+        Current chain tip; trial bonds originate here.
+    director : np.ndarray (3,) float32
+        Local director from nematic_q_director.
+    s_param : float
+        Local scalar order parameter S.
+    target_s : float
+        Target order S* governing the self-limiting penalty.
+
+    Returns
+    -------
+    np.ndarray (N,) float32
+        Per-candidate order-increase scores.
+    """
+    n = candidates.shape[0]
+    out = np.empty(n, dtype=np.float32)
+    limit = 1.0 - s_param / target_s
+    if limit < 0.0:
+        limit = 0.0
+    for k in range(n):
+        dx = candidates[k, 0] - tip[0]
+        dy = candidates[k, 1] - tip[1]
+        dz = candidates[k, 2] - tip[2]
+        dn = np.sqrt(dx * dx + dy * dy + dz * dz)
+        if dn < 1e-12:
+            out[k] = 0.0
+            continue
+        dot = (dx * director[0] + dy * director[1] + dz * director[2]) / dn
+        out[k] = dot * dot * limit
+    return out

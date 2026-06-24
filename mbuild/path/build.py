@@ -363,6 +363,36 @@ class Path:
         return
 
 
+def _lamellar_fold_arc(p0, p1, bond_length, sign):
+    """Half-circle fold connecting the end of one layer (``p0``) to the start of
+    the next (``p1``).
+
+    Generalizes the original fixed-radius arc: the diameter is the actual
+    ``p0 -> p1`` segment, so layers of *different* lengths (a growing fan) still
+    join with bond-length spacing. ``sign`` (+1/-1) picks which side the arc
+    bulges. When ``p1 - p0`` is the plain ``layer_separation`` step (equal-length
+    layers) this reduces exactly to the original half-circle.
+    """
+    p0 = np.asarray(p0, dtype=float)
+    p1 = np.asarray(p1, dtype=float)
+    center = 0.5 * (p0 + p1)
+    d = p1 - p0
+    radius = 0.5 * np.linalg.norm(d)
+    if radius < 1e-12:
+        return []
+    u = d / (2.0 * radius)  # unit vector p0 -> p1 (the arc diameter)
+    perp = np.array([-u[1], u[0], 0.0])  # in-plane normal (rotate u +90 deg)
+    arc_num_points = math.floor((radius * np.pi) / bond_length)
+    if arc_num_points < 1:
+        return []
+    arc_angle = np.pi / (arc_num_points + 1)
+    arc_angles = np.linspace(arc_angle, np.pi, arc_num_points, endpoint=False)
+    return [
+        center - np.cos(theta) * radius * u + sign * np.sin(theta) * radius * perp
+        for theta in arc_angles
+    ]
+
+
 def lamellar(
     path=None,
     num_layers=1,
@@ -514,6 +544,212 @@ def lamellar(
     path._connect_edges(
         connectivity="linear", indices=np.arange(start_index, stop_index)
     )
+    return path
+
+
+def _jitter_coords(coords, jitter, rng):
+    """Add isotropic Gaussian noise (std ``jitter``) to coordinates for
+    crystalline-*like* imperfections. Returns an (N, 3) float array."""
+    coords = np.asarray(coords, dtype=float)
+    if jitter:
+        coords = coords + rng.normal(0.0, jitter, size=coords.shape)
+    return coords
+
+
+def _spherulite_wedge_coords(
+    center,
+    axis_angle,
+    half_angle,
+    inner_radius,
+    num_layers,
+    layer_separation,
+    bond_length,
+):
+    """Coordinates of one chain-folded spherulite wedge (sector).
+
+    The lamellae are concentric circular arcs at radii ``inner_radius +
+    j*layer_separation``, each spanning ``axis_angle +/- half_angle``. Folds at
+    the wedge edges connect consecutive arcs: because the two joined ends sit at
+    the *same* angle (one ``layer_separation`` apart radially) and the arcs are
+    tangential there, the fold is tangent-continuous and the same size for every
+    layer -- no kinks, at any ``half_angle``. Arc length grows with radius, so
+    outer lamellae are automatically longer.
+    """
+    center = np.asarray(center, dtype=float)
+    coords = []
+    for j in range(num_layers):
+        r = inner_radius + j * layer_separation
+        arc_length = 2.0 * half_angle * r
+        n_pts = max(2, math.floor(arc_length / bond_length))
+        lo, hi = axis_angle - half_angle, axis_angle + half_angle
+        # Alternate sweep direction so the chain folds back and forth.
+        phis = np.linspace(lo, hi, n_pts) if j % 2 == 0 else np.linspace(hi, lo, n_pts)
+        coords.extend(center + r * np.array([np.cos(p), np.sin(p), 0.0]) for p in phis)
+        if j != num_layers - 1:
+            # Fold at the edge we ended on, out to the next radius (same angle).
+            edge_angle = phis[-1]
+            r_next = inner_radius + (j + 1) * layer_separation
+            p1 = center + r_next * np.array(
+                [np.cos(edge_angle), np.sin(edge_angle), 0.0]
+            )
+            # Bulge outside the wedge (beyond the edge we are at).
+            sign = 1.0 if edge_angle > axis_angle else -1.0
+            coords.extend(_lamellar_fold_arc(coords[-1], p1, bond_length, sign))
+    return coords
+
+
+def spherulite_wedge(
+    path=None,
+    half_angle=np.pi / 8,
+    num_layers=20,
+    layer_separation=0.5,
+    bond_length=0.3,
+    inner_radius=1.0,
+    center=(0, 0, 0),
+    axis_angle=0.0,
+    jitter=0.0,
+    seed=None,
+    bead_name="_A",
+):
+    """Generate a single chain-folded spherulite wedge (one sector / arm).
+
+    Concentric tangential lamellae (perpendicular to the radius) at radii
+    ``inner_radius + j*layer_separation``, each spanning ``axis_angle +/-
+    half_angle``, folded back and forth and growing outward. This is the
+    "back-and-forth folds, each longer than the last" structure; ``spherulite``
+    just tiles many of these around a nucleus to fill the disc.
+
+    Parameters
+    ----------
+    path : mbuild.path.Path, optional
+        Path to populate. A new one is created if omitted.
+    half_angle : float, default pi/8
+        Angular half-width of the wedge, in radians.
+    num_layers : int, default 20
+        Number of concentric lamellae (radial shells).
+    layer_separation : float, default 0.5
+        Radial spacing between lamellae.
+    bond_length : float, default 0.3
+        Distance between adjacent sites along a lamella.
+    inner_radius : float, default 1.0
+        Radius of the innermost lamella.
+    center : array-like (3,), default (0, 0, 0)
+        Wedge apex (nucleus).
+    axis_angle : float, default 0.0
+        Direction the wedge points, in radians (centerline angle).
+    jitter : float, default 0.0
+        Standard deviation of isotropic Gaussian noise added to every bead, for
+        crystalline-*like* imperfections. 0.0 is a perfect lattice.
+    seed : int, optional
+        Seed for the jitter RNG (reproducible noise).
+    bead_name : str or BeadNamer, optional, default '_A'
+        Name(s) for the beads.
+    """
+    if path is None:
+        path = Path()
+    center = np.asarray(center, dtype=float)
+    coords = _spherulite_wedge_coords(
+        center,
+        axis_angle,
+        half_angle,
+        inner_radius,
+        num_layers,
+        layer_separation,
+        bond_length,
+    )
+    coords = _jitter_coords(coords, jitter, np.random.default_rng(seed))
+    start_index = len(path.coordinates)
+    stop_index = start_index + len(coords)
+    namer = BeadNamer.coerce(bead_name)
+    names = np.array([next(namer) for _ in range(len(coords))], dtype="U10")
+    path.append_coordinates(coords, names)
+    path._connect_edges(
+        connectivity="linear", indices=np.arange(start_index, stop_index)
+    )
+    return path
+
+
+def spherulite(
+    path=None,
+    num_arms=8,
+    num_layers=20,
+    layer_separation=0.5,
+    bond_length=0.3,
+    inner_radius=1.0,
+    center=(0, 0, 0),
+    wedge_fraction=0.8,
+    jitter=0.0,
+    seed=None,
+    bead_name="_A",
+):
+    """Generate a 2-D spherulite: chain-folded lamellar wedges fanning radially.
+
+    ``num_arms`` wedges fan out around ``center``; each is a separate chain of
+    concentric tangential lamellae (perpendicular to the radius) folded back and
+    forth and growing outward -- the cross-section of a semicrystalline
+    spherulite. Built in the z = ``center[2]`` plane.
+
+    The arms are evenly spaced every ``2*pi / num_arms`` but each only fills
+    ``wedge_fraction`` of its slot, leaving an angular gap so neighboring fans do
+    not overlap as they grow.
+
+    Parameters
+    ----------
+    path : mbuild.path.Path, optional
+        Path to populate. A new one is created if omitted.
+    num_arms : int, default 8
+        Number of wedges fanned around the nucleus.
+    num_layers : int, default 20
+        Number of concentric lamellae (radial shells) per arm.
+    layer_separation : float, default 0.5
+        Radial spacing between lamellae.
+    bond_length : float, default 0.3
+        Distance between adjacent sites along a lamella.
+    inner_radius : float, default 1.0
+        Radius of the innermost lamella (a small core around the nucleus).
+    center : array-like (3,), default (0, 0, 0)
+        Spherulite nucleus.
+    wedge_fraction : float, default 0.8
+        Fraction of each arm's angular slot (``2*pi / num_arms``) that the wedge
+        fills, in (0, 1]. Values < 1 leave a gap between fans; 1.0 makes them
+        meet edge-to-edge (they will then overlap slightly at the folds).
+    jitter : float, default 0.0
+        Standard deviation of isotropic Gaussian noise added to every bead, for
+        crystalline-*like* imperfections. 0.0 is a perfect lattice.
+    seed : int, optional
+        Seed for the jitter RNG (reproducible noise across all arms).
+    bead_name : str or BeadNamer, optional, default '_A'
+        Name(s) for the beads (see ``lamellar``).
+    """
+    if path is None:
+        path = Path()
+    if not (0.0 < wedge_fraction <= 1.0):
+        raise ValueError("wedge_fraction should be in (0, 1].")
+    center = np.asarray(center, dtype=float)
+    rng = np.random.default_rng(seed)
+    slot_half = np.pi / num_arms  # half of each arm's angular slot
+    half_angle = wedge_fraction * slot_half
+    for k in range(num_arms):
+        axis_angle = 2.0 * slot_half * k  # arms stay evenly spaced
+        coords = _spherulite_wedge_coords(
+            center,
+            axis_angle,
+            half_angle,
+            inner_radius,
+            num_layers,
+            layer_separation,
+            bond_length,
+        )
+        coords = _jitter_coords(coords, jitter, rng)
+        start_index = len(path.coordinates)
+        stop_index = start_index + len(coords)
+        namer = BeadNamer.coerce(bead_name)
+        names = np.array([next(namer) for _ in range(len(coords))], dtype="U10")
+        path.append_coordinates(coords, names)
+        # Connect each arm linearly on its own (arms are separate chains).
+        path._connect_edges(
+            connectivity="linear", indices=np.arange(start_index, stop_index)
+        )
     return path
 
 

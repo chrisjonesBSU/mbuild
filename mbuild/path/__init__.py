@@ -6,6 +6,8 @@ from .build import (
     hard_sphere_random_walk,
     knot,
     lamellar,
+    spherulite,
+    spherulite_wedge,
     spiral_2D,
     straight_line,
     zigzag,

@@ -3,6 +3,7 @@ import pytest
 
 import mbuild as mb
 from mbuild.exceptions import PathConvergenceError
+from mbuild.path.bias import Ordering
 from mbuild.path.build import (
     Path,
     crosslink,
@@ -11,6 +12,8 @@ from mbuild.path.build import (
     helix,
     knot,
     lamellar,
+    spherulite,
+    spherulite_wedge,
     spiral_2D,
     straight_line,
     zigzag,
@@ -22,7 +25,10 @@ from mbuild.path.constraints import (
 )
 from mbuild.path.namers import CyclicNamer, RandomNamer
 from mbuild.path.path_utils import (
+    _sym_eig_3x3,
     local_density,
+    nematic_q_director,
+    order_alignment_scores,
     target_density,
     target_sq_distances,
 )
@@ -934,3 +940,196 @@ class TestCrossLinks(BaseTest):
         path2.relax(0.2, None, steps=10)
         print(path1.coordinates - path2.coordinates)
         assert np.allclose(path1.coordinates, path2.coordinates, atol=1e-6)
+
+
+class TestOrderingBias(BaseTest):
+    @staticmethod
+    def _paired_bonds(n_bonds):
+        """Bonds connecting consecutive (2i, 2i+1) coordinate pairs."""
+        return np.array([[2 * i, 2 * i + 1] for i in range(n_bonds)], dtype=np.int32)
+
+    def test_sym_eig_3x3_matches_numpy(self):
+        rng = np.random.default_rng(0)
+        for _ in range(100):
+            m = rng.normal(size=(3, 3))
+            m = m + m.T
+            ev, vecs = _sym_eig_3x3(
+                m[0, 0], m[0, 1], m[0, 2], m[1, 1], m[1, 2], m[2, 2]
+            )
+            assert np.allclose(np.sort(ev), np.linalg.eigvalsh(m), atol=1e-9)
+            # Eigenpairs reconstruct the original matrix.
+            assert np.allclose(vecs @ np.diag(ev) @ vecs.T, m, atol=1e-9)
+            # Eigenvalues are returned ascending.
+            assert ev[0] <= ev[1] <= ev[2]
+
+    def test_nematic_aligned_cluster(self):
+        pts = []
+        for i in range(8):
+            base = np.array([0, i * 0.3, i * 0.2], dtype=np.float32)
+            pts += [base, base + np.array([1, 0.02, 0], dtype=np.float32)]
+        coords = np.array(pts, dtype=np.float32)
+        center = coords.mean(axis=0).astype(np.float32)
+        n_local, s_param, director = nematic_q_director(
+            self._paired_bonds(8), coords, center, 100.0
+        )
+        assert n_local == 8
+        # Strongly uniaxial -> S ~ 1 and director along x.
+        assert s_param > 0.99
+        assert abs(director[0]) > 0.99
+
+    def test_nematic_planar_fan_director_in_plane(self):
+        """Regression: a planar bond fan must NOT report the perpendicular axis
+        as the director (the old power-iteration largest-|eigenvalue| bug)."""
+        pts = []
+        for k, t in enumerate(np.linspace(0, np.pi, 8)):
+            base = np.array([k * 0.05, k * 0.05, 0], dtype=np.float32)
+            u = np.array([np.cos(t), np.sin(t), 0], dtype=np.float32)
+            pts += [base, base + u]
+        coords = np.array(pts, dtype=np.float32)
+        center = coords.mean(axis=0).astype(np.float32)
+        _, s_param, director = nematic_q_director(
+            self._paired_bonds(8), coords, center, 100.0
+        )
+        # Director (max-eigenvalue axis) lies in the x-y plane, not along z, and
+        # S is the positive in-plane order, not the bug's negative minor-axis value.
+        assert abs(director[2]) < 1e-2
+        assert s_param > 0.0
+
+    def test_order_alignment_prolate(self):
+        director = np.array([1.0, 0.0, 0.0], dtype=np.float32)  # along x
+        tip = np.zeros(3, dtype=np.float32)
+        cands = np.array(
+            [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 1, 0]], dtype=np.float32
+        )
+        # Aligning with the director (parallel or antiparallel) scores high;
+        # perpendicular scores ~0.
+        s = order_alignment_scores(cands, tip, director, 0.0, 0.7)
+        assert s[0] == pytest.approx(s[1], abs=1e-6)  # +x == -x (nematic symmetry)
+        assert s[0] > 0.99 and s[2] < 1e-6 and s[3] < 1e-6
+        # Self-limiting factor zeroes the reward once order >= target.
+        s = order_alignment_scores(cands, tip, director, 0.7, 0.7)
+        assert np.allclose(s, 0.0)
+
+    def test_ordering_invalid_args(self):
+        with pytest.raises(ValueError):
+            Ordering(weight=0.5, r_cut=-1)
+        with pytest.raises(ValueError):
+            Ordering(weight=0.5, r_cut=4, target_order=1.5)
+
+    def test_ordering_live_walk(self):
+        radius = 0.25
+        bias = Ordering(weight=0.78, r_cut=4)
+        vol = CuboidConstraint(Lx=25)
+        term = Termination([NumSites(200), NumAttempts(300)])
+        rw = hard_sphere_random_walk(
+            path=Path(),
+            radius=radius,
+            bond_length=radius + 0.1,
+            bias=bias,
+            termination=term,
+            rw_angles=(1.5, 3.14),
+            seed=13,
+            volume_constraint=vol,
+            initial_point=np.array([0, 0, 0], dtype=np.float32),
+        )
+        assert term.success
+        assert len(rw.coordinates) == 200
+
+
+class TestSpherulite(BaseTest):
+    def test_wedge_bonds_and_kink_free(self):
+        bond_length = 0.3
+        p = Path()
+        spherulite_wedge(
+            path=p,
+            half_angle=np.radians(40),
+            num_layers=12,
+            layer_separation=0.6,
+            bond_length=bond_length,
+            inner_radius=2.0,
+        )
+        c = p.coordinates
+        b = np.diff(c, axis=0)
+        d = np.linalg.norm(b, axis=1)
+        # No gaps / stretched bonds (the Cartesian fold defect).
+        assert d.max() < 1.6 * bond_length
+        # Smooth folds, no sharp kinks.
+        bu = b / d[:, None]
+        turn = np.degrees(np.arccos(np.clip((bu[:-1] * bu[1:]).sum(1), -1, 1)))
+        assert turn.max() < 90.0
+
+    def test_wedge_stays_in_sector(self):
+        half = np.radians(30)
+        p = Path()
+        spherulite_wedge(
+            path=p,
+            half_angle=half,
+            num_layers=10,
+            layer_separation=0.5,
+            bond_length=0.3,
+            inner_radius=1.0,
+            axis_angle=0.0,
+        )
+        c = p.coordinates
+        ang = np.abs(np.arctan2(c[:, 1], c[:, 0]))
+        # Within the wedge, plus a little slack for the fold bulge at the edges.
+        assert ang.max() < half + 0.25
+
+    def test_wedge_layers_grow_outward(self):
+        # Arc length (one layer) should increase with radius.
+        p = Path()
+        spherulite_wedge(
+            path=p,
+            half_angle=np.radians(30),
+            num_layers=8,
+            layer_separation=0.6,
+            bond_length=0.3,
+            inner_radius=1.0,
+        )
+        c = p.coordinates
+        radii = np.linalg.norm(c[:, :2], axis=1)
+        assert radii.max() > radii.min()  # spans a range of radii
+        # outermost beads are farther out than innermost (grew outward)
+        assert radii[-50:].mean() > radii[:50].mean()
+
+    def test_spherulite_arm_count(self):
+        import networkx as nx
+
+        num_arms = 6
+        p = Path()
+        spherulite(
+            path=p,
+            num_arms=num_arms,
+            num_layers=8,
+            layer_separation=0.5,
+            bond_length=0.3,
+            inner_radius=1.0,
+            wedge_fraction=0.8,
+        )
+        # Each arm is its own chain -> one connected component per arm.
+        assert nx.number_connected_components(p.bond_graph) == num_arms
+
+    def test_spherulite_wedge_fraction_validation(self):
+        with pytest.raises(ValueError):
+            spherulite(num_arms=8, wedge_fraction=1.5)
+        with pytest.raises(ValueError):
+            spherulite(num_arms=8, wedge_fraction=0.0)
+
+    def test_jitter_reproducible_and_perturbs(self):
+        kw = dict(
+            half_angle=0.5,
+            num_layers=8,
+            layer_separation=0.5,
+            bond_length=0.3,
+            inner_radius=1.0,
+        )
+        p_clean = Path()
+        spherulite_wedge(path=p_clean, jitter=0.0, **kw)
+        p1 = Path()
+        spherulite_wedge(path=p1, jitter=0.03, seed=42, **kw)
+        p2 = Path()
+        spherulite_wedge(path=p2, jitter=0.03, seed=42, **kw)
+        # Same seed -> identical; jitter actually moves beads off the lattice.
+        assert np.allclose(p1.coordinates, p2.coordinates)
+        assert not np.allclose(p1.coordinates, p_clean.coordinates)
+        assert np.abs(p1.coordinates - p_clean.coordinates).max() < 0.5

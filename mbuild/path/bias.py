@@ -2,6 +2,10 @@
 
 import numpy as np
 
+from mbuild.path.path_utils import (
+    nematic_q_director,
+    order_alignment_scores,
+)
 from mbuild.path.path_utils import target_density as _target_density_cpu
 from mbuild.path.path_utils import (
     target_sq_distances as _target_sq_distances_cpu,
@@ -282,4 +286,155 @@ class AvoidDirection(Bias):
         scores = self.beta * alignment + noise
         # Larger dot product = better alignment with target, sort ascending (np default)
         sort_idx = np.argsort(scores)
+        return candidates[sort_idx]
+
+
+class Ordering(Bias):
+    """Bias next-moves toward increasing local (rod-like) nematic order.
+
+    Favors candidates whose trial bond aligns with the local nematic director,
+    building crystalline-*like* (semicrystalline) rod/extended-chain alignment
+    with tunable imperfections rather than a clean lattice. The amount of
+    disorder is set by ``weight`` (signal vs noise) and capped by
+    ``target_order`` (how good a domain is allowed to get before the bias
+    releases), so defects survive by design. For a perfect lattice use
+    ``path.build.lamellar`` (or ``spherulite``) instead.
+
+    Parameters
+    ----------
+    weight : float
+        Bias strength in (0, 1], as for all ``Bias`` subclasses. Sets the
+        signal/noise balance via the inherited ``beta`` and ``noise_scale``.
+        Lower weight -> more amorphous/defective; higher -> crisper alignment.
+    r_cut : float
+        Locality cutoff. A bond contributes to the local order tensor if its
+        midpoint lies within ``r_cut`` of the current chain tip. Same length
+        units as the walk.
+    target_order : float, optional, default 0.7
+        Target scalar order S* in (0, 1]. The alignment reward is scaled by
+        max(0, 1 - S_local / S*), so order is self-limiting: once a neighborhood
+        reaches S*, the bias switches off there and the walk wanders (amorphous).
+        Lower S* -> looser structure; higher S* -> more strongly aligned domains.
+    min_local_bonds : int, optional, default 3
+        Minimum number of in-cutoff bonds required to define a meaningful
+        director. Below this the bias is off (noise-only sort) for that step.
+    """
+
+    def __init__(self, weight, r_cut, target_order=0.7, min_local_bonds=3):
+        if r_cut <= 0:
+            raise ValueError("r_cut should be positive.")
+        if not (0.0 < target_order <= 1.0):
+            raise ValueError("target_order should be in (0, 1].")
+        self.r_cut = float(r_cut)
+        self.target_order = float(target_order)
+        self.min_local_bonds = int(min_local_bonds)
+        self._static_bonds = None
+        super().__init__(weight=weight)
+
+    def _attach_path(self, path, state):
+        """Attach path/state and cache previous chains' bonds as an int array.
+
+        Edges for all already-completed chains live in ``path.bond_graph`` (each
+        prior walk reconciled its graph at termination). We extract them once
+        here, restricted to sites below ``init_count`` (the start of the current
+        walk), into an (E, 2) int32 array. This avoids touching networkx -- which
+        is not numba-friendly -- on every step. The current walk's own bonds are
+        rebuilt cheaply each step from consecutive indices, since the graph is
+        not yet populated for the in-progress chain.
+        """
+        super()._attach_path(path, state)
+        init_count = int(getattr(state, "init_count", 0))
+        edges = []
+        bg = getattr(path, "bond_graph", None)
+        if bg is not None and init_count > 0:
+            for u, v in bg.edges():
+                # Keep only edges fully within the previously-placed sites.
+                if u < init_count and v < init_count:
+                    edges.append((int(u), int(v)))
+        if len(edges) > 0:
+            self._static_bonds = np.asarray(edges, dtype=np.int32)
+        else:
+            self._static_bonds = np.empty((0, 2), dtype=np.int32)
+
+    def _clean(self):
+        super()._clean()
+        self._static_bonds = None
+
+    def _all_bonds(self, n_sites, init_count):
+        """Combine cached previous-chain bonds with the current chain's
+        consecutive-pair bonds (init_count .. n_sites-1). Never bonds across the
+        init_count seam."""
+        # Current chain: consecutive pairs (init_count, init_count+1), ...
+        n_cur = n_sites - init_count
+        if n_cur >= 2:
+            starts = np.arange(init_count, n_sites - 1, dtype=np.int32)
+            cur = np.empty((starts.shape[0], 2), dtype=np.int32)
+            cur[:, 0] = starts
+            cur[:, 1] = starts + 1
+        else:
+            cur = np.empty((0, 2), dtype=np.int32)
+
+        if self._static_bonds is None or self._static_bonds.shape[0] == 0:
+            return cur
+        if cur.shape[0] == 0:
+            return self._static_bonds
+        return np.concatenate([self._static_bonds, cur], axis=0)
+
+    def __call__(self, candidates, coordinates, names):
+        """Sort candidate coordinates to favor increasing local nematic order.
+
+        Parameters
+        ----------
+        candidates : np.ndarray (N, 3)
+            Candidate sites for the next step.
+        coordinates : np.ndarray (M, 3)
+            All placed sites in the system (already trimmed to count by the
+            walker), spanning every chain built so far.
+        names : np.ndarray (M,)
+            Site names (unused here, kept for interface).
+
+        Returns
+        -------
+        np.ndarray (N, 3)
+            The candidate array, sorted most-favored first.
+        """
+        n = candidates.shape[0]
+        if n == 0:
+            return candidates
+
+        m = coordinates.shape[0]
+        init_count = (
+            int(getattr(self.state, "init_count", 0)) if self.state is not None else 0
+        )
+        if init_count < 0 or init_count > m:
+            init_count = 0
+
+        coords32 = coordinates.astype(np.float32)
+        tip = coords32[-1]
+        bonds = self._all_bonds(m, init_count)
+
+        # Not enough bonds anywhere to define locality -> bias off.
+        if bonds.shape[0] < self.min_local_bonds:
+            noise = self.rng.normal(0.0, 1.0, size=n)
+            return candidates[np.argsort(noise)]
+
+        n_local, s_param, director = nematic_q_director(
+            bonds, coords32, tip, self.r_cut
+        )
+
+        # Too few local bonds, or local order already saturated -> bias off.
+        if n_local < self.min_local_bonds or s_param >= self.target_order:
+            noise = self.rng.normal(0.0, 1.0, size=n)
+            return candidates[np.argsort(noise)]
+
+        scores = order_alignment_scores(
+            candidates.astype(np.float32),
+            tip,
+            director,
+            float(s_param),
+            self.target_order,
+        )
+        noise = self.rng.normal(0.0, self.noise_scale, size=scores.shape)
+        biased = self.beta * scores + noise
+        sort_idx = np.argsort(biased)[::-1]
         return candidates[sort_idx]
