@@ -14,24 +14,37 @@ def random_coordinate(
     bond_length,
     thetas,
     r_vectors,
+    pos3,
+    phis,
 ):
     """Default next_step method for HardSphereRandomWalk.
-    This method takes in a a batch of thetas and vectors
-    and creates a batch of random coordinates.
+    This method takes in a batch of thetas (bond angles) and vectors and creates
+    a batch of trial coordinates. If a batch of dihedral angles ``phis`` and a
+    third reference point ``pos3`` are provided, the azimuthal orientation of
+    each trial bond is set to reproduce that dihedral (instead of being random);
+    otherwise the azimuth is taken from ``r_vectors`` (uniform dihedral).
 
     Parameters
     ----------
-    pos1 : np.ndarray (1,3), required
-        The coordinate of the last accepted site.
-    pos2 : np.ndarray (1,3), required
+    pos1 : np.ndarray (3,) or None
+        The coordinate of the last accepted site (the chain tip). ``None``
+        requests a random point on a sphere around ``pos2``.
+    pos2 : np.ndarray (3,), required
         The coordinate of the second to last accepted site.
     bond_length : float, required
         The fixed bond length between pos1 and the new coordinates.
-    thetas : array-like (N, 1), required
-        A set of possible angles used to determine new
-        coordinates relative to pos2-pos1-new angle
+    thetas : array-like (N,), required
+        Bond angles for the new coordinates relative to the pos2-pos1-new angle.
     r_vectors : array-like (N, 3), required
-        A set of normal vectors used perform rotations around.
+        A set of random vectors used to set the azimuth when no dihedral is given.
+    pos3 : np.ndarray (3,) or None, required
+        The coordinate of the third to last accepted site, defining the reference
+        plane (pos3-pos2-pos1) for the dihedral. ``None`` disables dihedral
+        control (e.g. for the first placed bonds, where no dihedral exists yet).
+    phis : array-like (N,) or None, required
+        Dihedral angles (pos3-pos2-pos1-new) for each trial. ``None`` disables
+        dihedral control and falls back to the random azimuth from ``r_vectors``.
+        Convention matches HOOMD's ``dihedral.Table`` (cis = 0, trans = +/-pi).
     """
 
     if pos1 is None:  # pick random point in sphere.
@@ -40,17 +53,55 @@ def random_coordinate(
     # pos1 and pos2 are defined, use available angles to sample new coordinates
     v1 = pos2 - pos1
     v1_norm = v1 / norm(v1)
-    dot_products = (r_vectors * v1_norm).sum(axis=1)
-    r_perp = r_vectors - dot_products[:, None] * v1_norm
-    norms = np.sqrt((r_perp * r_perp).sum(axis=1))
-    # Handle rare cases where rprep vectors approach zero
-    norms = np.where(norms < 1e-6, 1.0, norms)
-    r_perp_norm = r_perp / norms[:, None]
-    # Batch of trial next-step vectors using angles and r_norms
+
+    if phis is None or pos3 is None:
+        # No dihedral control: random azimuth (uniform dihedral), as before.
+        dot_products = (r_vectors * v1_norm).sum(axis=1)
+        r_perp = r_vectors - dot_products[:, None] * v1_norm
+        norms = np.sqrt((r_perp * r_perp).sum(axis=1))
+        # Handle rare cases where rprep vectors approach zero
+        norms = np.where(norms < 1e-6, 1.0, norms)
+        r_perp_norm = r_perp / norms[:, None]
+        cos_thetas = np.cos(thetas)
+        sin_thetas = np.sin(thetas)
+        v2s = cos_thetas[:, None] * v1_norm + sin_thetas[:, None] * r_perp_norm
+        next_positions = pos1 + v2s * bond_length
+        return next_positions.astype(np.float32)
+
+    # Dihedral-controlled azimuth. Build an orthonormal frame in the plane
+    # perpendicular to the rotation axis v1_norm (the pos1-pos2 bond):
+    #   ref_perp : the direction toward pos3 (pos3 - pos2) projected into that plane
+    #   w        : v1_norm x ref_perp, completing the frame
+    # so that phi = 0 eclipses pos3 (cis) and phi = +/-pi is opposite (trans),
+    # matching HOOMD's dihedral.Table convention (verified against the measured
+    # pos3-pos2-pos1-new dihedral).
+    ref = pos3 - pos2
+    ref_dot = ref[0] * v1_norm[0] + ref[1] * v1_norm[1] + ref[2] * v1_norm[2]
+    ref_perp = ref - ref_dot * v1_norm
+    rp_norm = norm(ref_perp)
+    if rp_norm < 1e-6:
+        # Degenerate (collinear pos3-pos2-pos1): choose an arbitrary perpendicular.
+        if abs(v1_norm[0]) < 0.9:
+            a = np.array([1.0, 0.0, 0.0])
+        else:
+            a = np.array([0.0, 1.0, 0.0])
+        a_dot = a[0] * v1_norm[0] + a[1] * v1_norm[1] + a[2] * v1_norm[2]
+        ref_perp = a - a_dot * v1_norm
+        rp_norm = norm(ref_perp)
+    ref_perp = ref_perp / rp_norm
+    # w = v1_norm x ref_perp
+    w = np.empty(3)
+    w[0] = v1_norm[1] * ref_perp[2] - v1_norm[2] * ref_perp[1]
+    w[1] = v1_norm[2] * ref_perp[0] - v1_norm[0] * ref_perp[2]
+    w[2] = v1_norm[0] * ref_perp[1] - v1_norm[1] * ref_perp[0]
+
     cos_thetas = np.cos(thetas)
     sin_thetas = np.sin(thetas)
-    v2s = cos_thetas[:, None] * v1_norm + sin_thetas[:, None] * r_perp_norm
-    # Batch of trial positions
+    cos_phis = np.cos(phis)
+    sin_phis = np.sin(phis)
+    # Azimuthal direction at angle phi, then tilt theta off the bond axis.
+    perp = cos_phis[:, None] * ref_perp - sin_phis[:, None] * w
+    v2s = cos_thetas[:, None] * v1_norm + sin_thetas[:, None] * perp
     next_positions = pos1 + v2s * bond_length
     return next_positions.astype(np.float32)
 

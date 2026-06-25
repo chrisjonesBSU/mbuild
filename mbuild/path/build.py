@@ -886,6 +886,7 @@ def hard_sphere_random_walk(
     bond_length=0.15,
     radius=0.1,
     rw_angles=None,
+    rw_dihedrals=None,
     termination=None,
     volume_constraint=None,
     bias=None,
@@ -921,6 +922,14 @@ def hard_sphere_random_walk(
         use a Gaussian distribution by passing a dict with keys {'loc':mean, 'scale':std}.
         Finally, a numpy array of 1D or 2D array of numpy values can be passed, which will be sampled
         via numpy.random.choice method. The 2D case provides a set of weights.
+    rw_dihedrals : tuple or dict or np.array or AnglesSampler, default None
+        Set the dihedral sampling method, using the same forms as ``rw_angles``.
+        The default of None leaves the azimuth random (uniform dihedral). When
+        provided, the dihedral angle (formed by the previous three sites and the
+        new site) is sampled and reproduced for each placed site from the fourth
+        site onward. The convention uses (cis = 0, trans = +/-pi).
+        A 1D numpy array is sampled via
+        ``numpy.random.choice`` (e.g. draws from a target P(phi)).
     termination : termination condition, required
         Termination condition for the random walk. If an integer is passed,
         will terminate after reaching that number of sites. Can also pass a tuple of
@@ -958,6 +967,7 @@ def hard_sphere_random_walk(
         bond_length=bond_length,
         radius=radius,
         angles_sampler=rw_angles,
+        dihedrals_sampler=rw_dihedrals,
         bead_name=bead_name,
         initial_point=initial_point,
         previous_count=len(path.coordinates) if path else 0,
@@ -1115,13 +1125,22 @@ def hard_sphere_random_walk(
     # Main random walk loop
     walk_finished = False
     while not walk_finished:
-        batch_angles, batch_vectors = generate_trials(state)
+        batch_angles, batch_vectors, batch_phis = generate_trials(state)
+        # A dihedral needs three prior sites; only apply phi from the 4th site on.
+        if state.count >= 3:
+            pos3 = coordinates[state.count - 3]
+            phis = batch_phis
+        else:
+            pos3 = None
+            phis = None
         candidates = next_step(
             pos1=coordinates[state.count - 1],
             pos2=coordinates[state.count - 2],
             bond_length=bond_length,
             thetas=batch_angles,
             r_vectors=batch_vectors,
+            pos3=pos3,
+            phis=phis,
         )
         # Create mask for particles inside volume constraint, allows for PBC
         if state.volume_constraint:
@@ -1247,6 +1266,7 @@ class RandomWalkState:
         radius,
         angles_sampler,
         bead_name,
+        dihedrals_sampler=None,
         initial_point=None,
         previous_count=0,
         connectivity=None,
@@ -1282,15 +1302,65 @@ class RandomWalkState:
             self.angles = AnglesSampler("normal", angles_sampler, seed)
         elif isinstance(angles_sampler, np.ndarray):
             if angles_sampler.ndim == 1:
-                kwargs = {"a": angles_sampler}
+                self.angles = AnglesSampler("choice", {"a": angles_sampler}, seed)
             elif angles_sampler.ndim == 2:
-                kwargs = {"a": angles_sampler[0], "p": angles_sampler[1]}
-            self.angles = AnglesSampler("choice", kwargs, seed)
+                # [values, probabilities] -> sample theta ~ P(theta) from a table.
+                self.angles = AnglesSampler(
+                    "tabulated",
+                    {"values": angles_sampler[0], "probabilities": angles_sampler[1]},
+                    seed,
+                )
+            else:
+                raise ValueError(
+                    f"rw_angles array must be 1D or 2D, got {angles_sampler.ndim}D."
+                )
         elif isinstance(angles_sampler, AnglesSampler):
             self.angles = angles_sampler
         else:
             raise ValueError(
                 f"Please provide a reasonable value to set the rw_angles. Passed {angles_sampler}"
+            )
+        # Optional dihedral sampler. None disables dihedral control (the azimuth
+        # stays random -> uniform dihedral). Otherwise mirrors the angle sampler
+        # forms. A distinct seed (seed + 1) decorrelates it from the angle stream.
+        if dihedrals_sampler is None:
+            self.dihedrals = None
+        elif isinstance(dihedrals_sampler, AnglesSampler):
+            self.dihedrals = dihedrals_sampler
+        elif isinstance(dihedrals_sampler, tuple):
+            self.dihedrals = AnglesSampler(
+                "uniform",
+                {"low": dihedrals_sampler[0], "high": dihedrals_sampler[1]},
+                seed + 1,
+            )
+        elif (
+            isinstance(dihedrals_sampler, dict)
+            and dihedrals_sampler.get("loc")
+            and dihedrals_sampler.get("scale")
+        ):
+            self.dihedrals = AnglesSampler("normal", dihedrals_sampler, seed + 1)
+        elif isinstance(dihedrals_sampler, np.ndarray):
+            if dihedrals_sampler.ndim == 1:
+                self.dihedrals = AnglesSampler(
+                    "choice", {"a": dihedrals_sampler}, seed + 1
+                )
+            elif dihedrals_sampler.ndim == 2:
+                # [values, probabilities] -> sample phi ~ P(phi) from a table.
+                self.dihedrals = AnglesSampler(
+                    "tabulated",
+                    {
+                        "values": dihedrals_sampler[0],
+                        "probabilities": dihedrals_sampler[1],
+                    },
+                    seed + 1,
+                )
+            else:
+                raise ValueError(
+                    f"rw_dihedrals array must be 1D or 2D, got {dihedrals_sampler.ndim}D."
+                )
+        else:
+            raise ValueError(
+                f"Please provide a reasonable value to set the rw_dihedrals. Passed {dihedrals_sampler}"
             )
         self.bead_name = bead_name
         if hasattr(initial_point, "__len__") and len(initial_point) == 3:

@@ -42,7 +42,7 @@ def get_second_point(state, existing_points, beads, check_path, next_step):
         found within the trial batch.
 
     """
-    batch_angles, batch_vectors = generate_trials(state)
+    batch_angles, batch_vectors, _ = generate_trials(state)
     # If this RW is using link linear, pos2 = last site of last
     # Set pos1 and pos2 before checking include compound and combining coordinates
     if state.connectivity == "link-linear" and len(existing_points) > 1:
@@ -64,6 +64,8 @@ def get_second_point(state, existing_points, beads, check_path, next_step):
         bond_length=state.bond_length,
         thetas=batch_angles,
         r_vectors=batch_vectors,
+        pos3=None,
+        phis=None,
     )
     if state.volume_constraint:
         is_inside_mask = state.volume_constraint.is_inside(
@@ -173,7 +175,7 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
             )
         # generate point off of current path coordinates
         starting_xyz = existing_points[state.initial_point]
-        batch_angles, batch_vectors = generate_trials(state)
+        batch_angles, batch_vectors, _ = generate_trials(state)
         # TODO: If building from a path with coordinates, can we try to get both pos1 and pos2?
         xyzs = next_step(
             pos1=None,  # will generate sphere of points around pos2
@@ -181,6 +183,8 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
             bond_length=state.bond_length,
             thetas=batch_angles,
             r_vectors=batch_vectors,
+            pos3=None,
+            phis=None,
         )
         if state.volume_constraint:
             is_inside_mask = state.volume_constraint.is_inside(
@@ -269,46 +273,117 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
 
 
 class AnglesSampler:
-    """
-    TODO:Allow for passing a specific 2D weighted pre-defined sample, as opposed to a numpy distribution.
-    This would use np.random.choice instead as the sample method.
+    """Sample angles (or dihedrals) from a named distribution.
+
+    The ``"uniform"`` and ``"normal"`` distributions are minimal, out-of-the-box
+    samplers. The ``"tabulated"`` distribution samples a value y from an arbitrary
+    tabulated distribution P(y) (e.g. a target ``P(theta)`` / ``P(phi)`` measured
+    from an MD simulation or built from a table potential).
+
     NOTES
     -----
-    "uniform" distribution should use 'low' and 'high' as kwargs.
-    "normal" distribution should use 'loc' and 'scale' as kwargs.
+    - ``"uniform"`` distribution should use ``'low'`` and ``'high'`` as kwargs.
+    - ``"normal"`` distribution should use ``'loc'`` and ``'scale'`` as kwargs.
+    - ``"choice"`` distribution should use ``'a'`` (and optionally ``'p'``).
+    - ``"tabulated"`` distribution should use ``'values'`` (the y grid) and
+      ``'probabilities'`` (P(y), un-normalized weights are fine — they are
+      normalized internally). Optional ``'interpolate'`` (default ``True``)
+      selects continuous inverse-CDF sampling; ``False`` samples discretely at
+      the grid ``values``. The grid need not be sorted.
     """
 
     def __init__(self, distributionStr, kwargs, seed):
         # Create a generator object for high-quality random numbers [9]
         self.rng = np.random.default_rng(seed)
-        if distributionStr.lower() == "uniform":
+        self.distribution = distributionStr.lower()
+        if self.distribution == "uniform":
             self.sampler = self.rng.uniform
             assert "low" in kwargs
             assert "high" in kwargs
-        elif distributionStr.lower() == "normal":
+        elif self.distribution == "normal":
             self.sampler = self.rng.normal
             assert "loc" in kwargs
             assert "scale" in kwargs
-        elif distributionStr == "choice":
+        elif self.distribution == "choice":
             self.sampler = self.rng.choice
             assert "a" in kwargs  # p is not required
+        elif self.distribution == "tabulated":
+            self._init_tabulated(kwargs)
         else:
             raise NotImplementedError(
                 f"Sample Distribution {distributionStr} not supported."
             )
         self.kwargs = kwargs
 
+    def _init_tabulated(self, kwargs):
+        """Precompute the (normalized) CDF for inverse-transform sampling."""
+        if "values" not in kwargs or "probabilities" not in kwargs:
+            raise ValueError(
+                "The 'tabulated' distribution requires 'values' and "
+                "'probabilities' kwargs."
+            )
+        values = np.asarray(kwargs["values"], dtype=float)
+        probs = np.asarray(kwargs["probabilities"], dtype=float)
+        if values.shape != probs.shape or values.ndim != 1:
+            raise ValueError(
+                "'values' and 'probabilities' must be 1D arrays of equal length."
+            )
+        if np.any(probs < 0):
+            raise ValueError("'probabilities' must be non-negative.")
+        total = probs.sum()
+        if total <= 0:
+            raise ValueError("'probabilities' must sum to a positive value.")
+        # Sort by value so the CDF is monotonic.
+        order = np.argsort(values)
+        self._values = values[order]
+        self._probs = probs[order] / total
+        self.interpolate = bool(kwargs.get("interpolate", True))
+        # CDF on grid points, prepended with 0 so the inversion covers [0, 1).
+        self._cdf = np.concatenate([[0.0], np.cumsum(self._probs)])
+        self._cdf_values = np.concatenate([[self._values[0]], self._values])
+
     def sample(self, size=None):
+        if self.distribution == "tabulated":
+            n = 1 if size is None else size
+            u = self.rng.uniform(size=n)
+            if self.interpolate:
+                # Continuous inverse-CDF (linear interpolation between grid points).
+                out = np.interp(u, self._cdf, self._cdf_values)
+            else:
+                # Discrete: return the grid value of the bin u falls into.
+                idx = np.clip(
+                    np.searchsorted(self._cdf, u, side="right") - 1,
+                    0,
+                    len(self._values) - 1,
+                )
+                out = self._values[idx]
+            return out if size is not None else out[0]
         return self.sampler(size=size, **self.kwargs)
 
 
 def generate_trials(state):
-    """Use normal or uniform sampling on angles, uniform sampling on radius."""
+    """Sample a batch of trial bond angles, random vectors, and (optionally) dihedrals.
+
+    Angles are sampled from ``state.angles`` (normal/uniform/choice) and the
+    random vectors set the azimuth when no dihedral control is used. If a
+    dihedral sampler was passed to ``hard_sphere_random_walk`` (``state.dihedrals``
+    is set), a batch of dihedral angles ``phis`` is also sampled; otherwise
+    ``phis`` is ``None`` and only vectors and angles are generated.
+
+    Returns
+    -------
+    thetas : np.ndarray (batch,)
+    r_vectors : np.ndarray (batch, 3)
+    phis : np.ndarray (batch,) or None
+    """
     thetas = state.angles.sample(size=state.trial_batch_size).astype(np.float32)
     r = state.rng.uniform(-0.5, 0.5, size=(state.trial_batch_size, 3)).astype(
         np.float32
     )
-    return thetas, r
+    phis = None
+    if getattr(state, "dihedrals", None) is not None:
+        phis = state.dihedrals.sample(size=state.trial_batch_size).astype(np.float32)
+    return thetas, r, phis
 
 
 def generate_crosslink_init_points():
