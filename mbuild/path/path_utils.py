@@ -107,7 +107,7 @@ def random_coordinate(
 
 
 @njit(cache=True, fastmath=True)
-def check_path(existing_points, new_point, radius, tolerance):
+def check_path(existing_points, new_point, radius, tolerance, pbc, box_lengths):
     """Default check path method for HardSphereRandomWalk.
 
     Parameters
@@ -122,6 +122,14 @@ def check_path(existing_points, new_point, radius, tolerance):
         The radius used for hard-sphere overlap checks.
     tolerance : float, required
         Tolerance in center-to-center distances, allowing for rounding errors.
+    pbc : np.ndarray (3,) of bool, required
+        Per-axis periodic boundary flags. Where True, the corresponding
+        component is compared under the minimum image convention so that
+        candidates near a box face are tested against beads on the opposite
+        face (wrapping the candidate position alone is not sufficient).
+    box_lengths : np.ndarray (3,) of float, required
+        Per-axis box lengths used for the minimum image. Ignored on axes
+        where ``pbc`` is False (pass ``np.inf`` there if desired).
     """
     if existing_points is None or existing_points.size == 0:
         return True
@@ -130,6 +138,8 @@ def check_path(existing_points, new_point, radius, tolerance):
         dist_sq = 0.0
         for j in range(existing_points.shape[1]):
             diff = existing_points[i, j] - new_point[j]
+            if pbc[j]:
+                diff -= np.round(diff / box_lengths[j]) * box_lengths[j]
             dist_sq += diff * diff
         if dist_sq < min_sq_dist:
             return False

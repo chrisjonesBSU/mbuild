@@ -3,6 +3,7 @@
 import logging
 import math
 import time
+from functools import partial
 
 import networkx as nx
 import numpy as np
@@ -1058,7 +1059,14 @@ def hard_sphere_random_walk(
     else:
         check_path_gpu = None
 
-    check_path_cpu = check_path
+    # Minimum-image overlap check (GPU kernel not yet PBC-aware).
+    if any(p for p in pbc):
+        _pbc = np.asarray(pbc, dtype=np.bool_)
+        _box_lengths = np.asarray(box_lengths, dtype=np.float32)
+    else:
+        _pbc = np.zeros(3, dtype=np.bool_)
+        _box_lengths = np.full(3, np.inf, dtype=np.float32)
+    check_path_cpu = partial(check_path, pbc=_pbc, box_lengths=_box_lengths)
     next_step = random_coordinate
 
     # Set start time for wall time terminator
