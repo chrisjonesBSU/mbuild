@@ -381,7 +381,7 @@ def lamellar(
     num_layers=1,
     layer_separation=None,
     layer_length=None,
-    bond_length=None,
+    spacing=None,
     initial_point=(0, 0, 0),
     num_stacks=1,
     stack_separation=None,
@@ -400,7 +400,7 @@ def lamellar(
         The distance between any two layers.
     layer_length : float (nm), required
         The distance of a lamellar layer before curving to the next.
-    bond_length : float (nm), required
+    spacing : float (nm), required
         The distance between two adjacent sites in the path.
     initial_point : nd.array (1,3), default (0,0,0)
         The coordinate of the first site of the lamellar path.
@@ -420,7 +420,7 @@ def lamellar(
     initial_point = np.asarray(initial_point)
 
     # Coordinates in the y-direction (layer-length) of the lamellar layer
-    layer_spacing = np.arange(0, layer_length, bond_length)
+    layer_spacing = np.arange(0, layer_length, spacing)
     if not left_to_right:
         layer_spacing *= -1
     layer_spacing += initial_point[1]
@@ -428,7 +428,7 @@ def lamellar(
     # Info needed for generating coords of the arc curves between layers
     r = layer_separation / 2
     arc_length = r * np.pi
-    arc_num_points = math.floor(arc_length / bond_length)
+    arc_num_points = math.floor(arc_length / spacing)
     arc_angle = np.pi / (arc_num_points + 1)
     arc_angles = np.linspace(arc_angle, np.pi, arc_num_points, endpoint=False)
 
@@ -474,7 +474,7 @@ def lamellar(
         first_stack_coordinates = np.copy(np.array(coordinates))
         r = stack_separation / 2
         arc_length = r * np.pi
-        arc_num_points = math.floor(arc_length / bond_length)
+        arc_num_points = math.floor(arc_length / spacing)
         arc_angle = np.pi / (arc_num_points + 1)
         arc_angles = np.linspace(arc_angle, np.pi, arc_num_points, endpoint=False)
 
@@ -971,6 +971,13 @@ def hard_sphere_random_walk(
         once the system exceeds ~30000 sites; True forces it on; False uses
         brute force. Ignored when run_on_gpu is True.
     """
+    # Create seed sequence used by multiple path classes
+    # The namer seed is separate, so that coordinates are impacted by naming methods.
+    previous_count = len(path.coordinates) if path else 0
+    seed_sequence = np.random.SeedSequence(seed + previous_count)
+    name_seed_sequence = seed_sequence.spawn(1)[0]
+    rng = np.random.default_rng(seed_sequence)
+
     # Create state object to track random walk progress
     state = RandomWalkState(
         bond_length=bond_length,
@@ -978,7 +985,7 @@ def hard_sphere_random_walk(
         angles_sampler=rw_angles,
         bead_name=bead_name,
         initial_point=initial_point,
-        previous_count=len(path.coordinates) if path else 0,
+        previous_count=previous_count,
         include_compound=include_compound,
         connectivity=connectivity,
         seed=seed,
@@ -988,6 +995,7 @@ def hard_sphere_random_walk(
         chunk_size=chunk_size,
         run_on_gpu=bool(run_on_gpu) and _get_cuda_available(),
         use_cell_list=use_cell_list,
+        rng=rng,
     )
     if path is None:  # Create empty path
         path = Path()
@@ -1008,10 +1016,7 @@ def hard_sphere_random_walk(
     state.termination._attach_path(path, state)
 
     namer = BeadNamer.coerce(bead_name)
-
-    # Create RNG state
-    rng = np.random.default_rng(seed + len(path.coordinates))
-    state.rng = rng
+    namer._attach_rng(np.random.default_rng(name_seed_sequence))
 
     # Set up PBC info from volume constraints cast to numba-safe arrays
     if isinstance(volume_constraint, CuboidConstraint):
@@ -1350,6 +1355,7 @@ class RandomWalkState:
         chunk_size=512,
         run_on_gpu=False,
         use_cell_list="auto",
+        rng=None,
     ):
         self.bond_length = bond_length
         self.radius = radius
@@ -1357,31 +1363,52 @@ class RandomWalkState:
             raise ValueError(
                 "Bond length should be greater than radius to prevent overlaps."
             )
+        # Single RNG drives all walk randomness (angles, positions, bias,
+        # volume-constraint sampling).
+        if rng is None:
+            rng = np.random.default_rng(seed + previous_count)
+        self.rng = rng
+        # Multiple ways to handle angles_sampler arg:
         if angles_sampler is None:
             self.angles = AnglesSampler(
-                "uniform", {"low": np.pi / 2, "high": np.pi}, seed
+                "uniform", {"low": np.pi / 2, "high": np.pi}, rng=self.rng
             )
-        elif isinstance(angles_sampler, tuple):
+        # Pass in a tupe or list of (low, high)
+        elif isinstance(angles_sampler, (tuple, list)) and len(angles_sampler) == 2:
             self.angles = AnglesSampler(
-                "uniform", {"low": angles_sampler[0], "high": angles_sampler[1]}, seed
+                "uniform",
+                {"low": angles_sampler[0], "high": angles_sampler[1]},
+                rng=self.rng,
             )
-        elif (
-            isinstance(angles_sampler, dict)
-            and angles_sampler.get("loc")
-            and angles_sampler.get("scale")
-        ):
-            self.angles = AnglesSampler("normal", angles_sampler, seed)
+        # Pass in a dict with supported kwargs
+        elif isinstance(angles_sampler, dict):
+            if angles_sampler.get("loc") and angles_sampler.get("scale"):
+                self.angles = AnglesSampler("normal", angles_sampler, rng=self.rng)
+            elif angles_sampler.get("low") and angles_sampler.get("high"):
+                self.angles = AnglesSampler("uniform", angles_sampler, rng=self.rng)
+            else:
+                raise ValueError(
+                    f"kwargs {dict} cannot be used to create an AnglesSampler."
+                )
+        # Pass in an array of choices
         elif isinstance(angles_sampler, np.ndarray):
             if angles_sampler.ndim == 1:
                 kwargs = {"a": angles_sampler}
             elif angles_sampler.ndim == 2:
                 kwargs = {"a": angles_sampler[0], "p": angles_sampler[1]}
-            self.angles = AnglesSampler("choice", kwargs, seed)
+            else:
+                raise ValueError(
+                    "Sampling angles from an array of choices is only supported for 1D and 2D arrays."
+                )
+            self.angles = AnglesSampler("choice", kwargs, rng=self.rng)
+        # Pass in an AnglesSampler instance.
         elif isinstance(angles_sampler, AnglesSampler):
             self.angles = angles_sampler
+            self.angles.rng = self.rng
         else:
             raise ValueError(
-                f"Please provide a reasonable value to set the rw_angles. Passed {angles_sampler}"
+                f"{angles_sampler} is not a supported form to sample angles. "
+                "See mbuild.path.points.AnglesSampler."
             )
         self.bead_name = bead_name
         if hasattr(initial_point, "__len__") and len(initial_point) == 3:
