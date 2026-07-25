@@ -21,6 +21,51 @@ from mbuild.utils.validation import assert_port_exists
 __all__ = ["Polymer"]
 
 
+def _get_alignment_rotation(v1, v2):
+    """Rotation that aligns the *directed* vector ``v1`` onto ``v2``.
+
+    Used to orient a monomer along a path so its forward-bonding (tail/``down``)
+    port points toward the next site and its backward-bonding (head/``up``) port
+    toward the previous one. The alignment is directional: unlike aligning an
+    undirected line, ``v1`` is rotated fully onto ``v2`` so a monomer is never
+    flipped 180 degrees relative to its neighbors (which would make the
+    connecting bond reach back across the monomer). Returns ``(axis, angle)``
+    for use with ``Compound.rotate``.
+
+    Two degenerate cases are handled explicitly, because ``np.cross`` of
+    collinear vectors is the zero vector and rotating about a zero-length axis
+    is undefined (it yields NaN coordinates once the axis is normalized):
+
+    - already parallel  -> zero-angle no-op about an arbitrary valid axis.
+    - antiparallel      -> 180 degree rotation about an arbitrary axis
+      perpendicular to ``v1``.
+    """
+    v1 = np.asarray(v1, dtype=float)
+    v2 = np.asarray(v2, dtype=float)
+    n1 = np.linalg.norm(v1)
+    n2 = np.linalg.norm(v2)
+    default_axis = np.array([0.0, 0.0, 1.0])
+    if n1 == 0.0 or n2 == 0.0:
+        return default_axis, 0.0
+    v1 = v1 / n1
+    v2 = v2 / n2
+    axis = np.cross(v1, v2)
+    axis_norm = np.linalg.norm(axis)
+    if axis_norm < 1e-8:
+        # v1 and v2 are collinear
+        if np.dot(v1, v2) > 0:
+            return default_axis, 0.0  # already aligned
+        # antiparallel: 180 deg about any axis perpendicular to v1
+        perp = np.cross(v1, [1.0, 0.0, 0.0])
+        if np.linalg.norm(perp) < 1e-8:
+            perp = np.cross(v1, [0.0, 1.0, 0.0])
+        perp = perp / np.linalg.norm(perp)
+        return perp, np.pi
+    axis = axis / axis_norm
+    angle = np.arccos(np.clip(np.dot(v1, v2), -1.0, 1.0))
+    return axis, angle
+
+
 class Polymer(Compound):
     """Connect one or more components in a specified sequence.
 
@@ -326,15 +371,8 @@ class Polymer(Compound):
                         pass
                     else:
                         v1 = this_part_head.pos - this_part_tail.pos
-                        v1 /= np.linalg.norm(v1)
                         v2 = coordinates[site_count + 1] - coordinates[site_count]
-                        v2 /= np.linalg.norm(v2)
-                        normal = np.cross(v1, v2)
-                        angle = np.arccos(
-                            v1.dot(v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
-                        )
-                        if angle > np.pi / 2:
-                            angle = np.pi - angle
+                        normal, angle = _get_alignment_rotation(v1, v2)
                         # Center of mass needs to be at origin for rotation
                         this_part.translate_to((0, 0, 0))
                         this_part.rotate(around=normal, theta=angle)
@@ -357,19 +395,22 @@ class Polymer(Compound):
                             pass
                         else:
                             v1 = this_part_head.pos - this_part_tail.pos
-                            v1 /= np.linalg.norm(v1)
-                            # v2 is the vector between the previous site pos and next site pos
-                            v2 = (
+                            # v2 is the local path tangent: the central difference
+                            # between neighboring sites, falling back to a one-
+                            # sided difference at the ends so the last monomer is
+                            # still oriented (site_count + 1 may not exist).
+                            nxt = (
                                 coordinates[site_count + 1]
-                                - coordinates[site_count - 1]
+                                if site_count + 1 < len(coordinates)
+                                else coordinates[site_count]
                             )
-                            v2 /= np.linalg.norm(v2)
-                            normal = np.cross(v1, v2)
-                            angle = np.arccos(
-                                v1.dot(v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+                            prv = (
+                                coordinates[site_count - 1]
+                                if site_count - 1 >= 0
+                                else coordinates[site_count]
                             )
-                            if angle > np.pi / 2:
-                                angle = np.pi - angle
+                            v2 = nxt - prv
+                            normal, angle = _get_alignment_rotation(v1, v2)
                             # Center of mass needs to be at origin for rotation
                             this_part.translate_to((0, 0, 0))
                             this_part.rotate(around=normal, theta=angle)
@@ -398,20 +439,13 @@ class Polymer(Compound):
                     head = anchor_particle.pos
                     tail = compound.center
                     v1 = head - tail
-                    v1 /= np.linalg.norm(v1)
                     if i == 0:  # v2 is between first monomer 0 and end group
                         end_group_index = 0
                         v2 = coordinates[1] - coordinates[0]
                     elif i == 1:  # v2 is between end group and last monomer
                         end_group_index = -1
                         v2 = coordinates[-1] - coordinates[-2]
-                    v2 /= np.linalg.norm(v2)
-                    normal = np.cross(v1, v2)
-                    angle = np.arccos(
-                        v1.dot(v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
-                    )
-                    if angle > np.pi / 2:
-                        angle = np.pi - angle
+                    normal, angle = _get_alignment_rotation(v1, v2)
                     # Center of mass needs to be at origin for rotation
                     compound.translate_to((0, 0, 0))
                     compound.rotate(around=normal, theta=angle)
