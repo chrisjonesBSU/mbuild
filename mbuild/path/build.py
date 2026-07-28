@@ -878,7 +878,6 @@ def hard_sphere_random_walk(
     trial_batch_size=20,
     tolerance=1e-5,
     chunk_size=512,
-    run_on_gpu=False,
 ):
     """Generates coordinates from a self avoiding random walk using
     fixed bond lengths, hard spheres, and minimum and maximum angles
@@ -930,9 +929,6 @@ def hard_sphere_random_walk(
         Tolerance used for rounding and checking for overlaps.
     chunk_size : int, default = 512
         Size of coordinate chunks to allocate
-    run_on_gpu : bool, default = False
-        If True and CUDA path utilities are available, use GPU-accelerated
-        implementations.
     """
     # Create state object to track random walk progress
     state = RandomWalkState(
@@ -949,7 +945,6 @@ def hard_sphere_random_walk(
         tolerance=tolerance,
         trial_batch_size=int(trial_batch_size),
         chunk_size=chunk_size,
-        run_on_gpu=bool(run_on_gpu) and _get_cuda_available(),
     )
     if path is None:  # Create empty path
         path = Path()
@@ -1020,15 +1015,6 @@ def hard_sphere_random_walk(
 
     state.init_count = state.count
 
-    # Select methods for random walk
-    if state.run_on_gpu:
-        from mbuild.path.path_utils_gpu import check_path_split
-
-        logger.info("Running hard_sphere_random_walk on a CUDA device.")
-        check_path_gpu = check_path_split
-    else:
-        check_path_gpu = None
-
     check_path_cpu = check_path
     next_step = random_coordinate
 
@@ -1080,19 +1066,6 @@ def hard_sphere_random_walk(
     if state.check_termination(path, coordinates, beads):
         return path
 
-    # Prepare GPU static points if using GPU
-    if state.run_on_gpu:
-        from numba import cuda
-
-        static_parts = []
-        if state.init_count > 0:
-            static_parts.append(coordinates[: state.init_count])
-        if include_compound:
-            static_parts.append(include_compound.xyz)
-        if static_parts:
-            static_points = np.concatenate(static_parts).astype(np.float32)
-            state.gpu_static_points = cuda.to_device(static_points)
-
     # Main random walk loop
     walk_finished = False
     while not walk_finished:
@@ -1124,33 +1097,19 @@ def hard_sphere_random_walk(
             )
         # Check candidate sites
         accept_xyz = None
-        if state.run_on_gpu and len(candidates) > 0:
-            # Run on GPU checks all candidates, choses the first accepted
-            dynamic_points = coordinates[state.init_count : state.count]
-            valid_mask = check_path_gpu(
-                state.gpu_static_points,
-                dynamic_points,
-                candidates,
-                radius,
-                tolerance,
-            )
-            valid_candidates = candidates[valid_mask]
-            if len(valid_candidates) > 0:
-                accept_xyz = valid_candidates[0]
-        else:
-            existing_points = coordinates[: state.count]
-            if state.include_compound:  # Include compound's particle coordinates
-                existing_points = np.concat((existing_points, include_compound.xyz))
-            # Iterate through current state of candidates, break after first accept
-            for xyz in candidates:
-                if check_path_cpu(
-                    existing_points=existing_points,
-                    new_point=xyz,
-                    radius=radius,
-                    tolerance=tolerance,
-                ):
-                    accept_xyz = xyz
-                    break
+        existing_points = coordinates[: state.count]
+        if state.include_compound:  # Include compound's particle coordinates
+            existing_points = np.concat((existing_points, include_compound.xyz))
+        # Iterate through current state of candidates, break after first accept
+        for xyz in candidates:
+            if check_path_cpu(
+                existing_points=existing_points,
+                new_point=xyz,
+                radius=radius,
+                tolerance=tolerance,
+            ):
+                accept_xyz = xyz
+                break
 
         if accept_xyz is not None:
             coordinates[state.count] = accept_xyz
@@ -1216,10 +1175,6 @@ class RandomWalkState:
         Number of trial moves per step
     chunk_size : int
         Size of coordinate chunks to allocate
-    run_on_gpu : bool
-        Whether GPU acceleration is being used
-    gpu_static_points : device array or None
-        GPU array of static points for overlap checking
     """
 
     def __init__(
@@ -1239,7 +1194,6 @@ class RandomWalkState:
         tolerance=1e-5,
         trial_batch_size=20,
         chunk_size=512,
-        run_on_gpu=False,
     ):
         self.bond_length = bond_length
         self.radius = radius
@@ -1288,14 +1242,12 @@ class RandomWalkState:
         self.bias = bias
         self.trial_batch_size = trial_batch_size
         self.chunk_size = chunk_size
-        self.run_on_gpu = run_on_gpu
 
         # State tracking
         self.count = 0
         self.init_count = 0
         self.attempts = 0
         self.start_time = None
-        self.gpu_static_points = None
 
     def check_termination(self, path, coordinates, beads):
         """Examine and process termination if we have reached.
@@ -1358,7 +1310,6 @@ def crosslink(
     initial_point=None,
     seed=42,
     chunk_size=512,
-    run_on_gpu=False,
 ):
     """
     Create a crosslink node that bonds to n_connection_sites backbone beads.
@@ -1384,8 +1335,6 @@ def crosslink(
         Random seed for reproducibility
     chunk_size : int, default 512
         Chunk size for batch processing (used if extending coordinates)
-    run_on_gpu : bool, default False
-        Whether to use GPU acceleration via numba
 
     Returns
     -------
@@ -1479,7 +1428,6 @@ def crosslink(
     found_ref = False  # flag to check all ref_nodes
     for ref_node, ref_coord in zip(ref_nodes, ref_coords):
         selected_nodes = [ref_node]  # first choice is ref
-        # GPU-accelerated distance calculation
         sq_distances = calculate_sq_distances(
             ref_coord, candidate_coords, pbc=pbc, box_lengths=box_lengths
         )
@@ -1547,19 +1495,3 @@ def crosslink(
 class CrosslinkWalkState:
     # TODO
     pass
-
-
-_CUDA_AVAILABLE = None
-
-
-def _get_cuda_available():
-    """Check if numba can access CUDA runtime."""
-    global _CUDA_AVAILABLE
-    if _CUDA_AVAILABLE is None:
-        try:
-            from numba import cuda
-
-            _CUDA_AVAILABLE = cuda.is_available()
-        except Exception:
-            _CUDA_AVAILABLE = False
-    return _CUDA_AVAILABLE
