@@ -360,6 +360,8 @@ def angle_table_from_sampler(sampler, n_bins=100, jacobian=True, n_samples=500_0
     ----------
     sampler : mbuild.path.points.AnglesSampler
         Provides sampled bond angles (radians) via sampler.sample(size).
+        Angles outside [0, pi] are folded back into range, matching the
+        geometry used to place sites in a random walk.
     n_bins : int, default 100
         Number of evenly spaced theta points from 0 to pi.
     jacobian : bool, default True
@@ -375,8 +377,8 @@ def angle_table_from_sampler(sampler, n_bins=100, jacobian=True, n_samples=500_0
         length n_bins, ready for hoomd.md.angle.Table.
     """
     theta = np.linspace(0.0, math.pi, n_bins)
-    samples = np.clip(
-        np.asarray(sampler.sample(size=n_samples), dtype=float), 0.0, math.pi
+    samples = np.arccos(
+        np.cos(np.asarray(sampler.sample(size=n_samples), dtype=float))
     )
     density, edges = np.histogram(
         samples, bins=n_bins, range=(0.0, math.pi), density=True
@@ -415,7 +417,8 @@ def dihedral_table_from_sampler(sampler, n_bins=100, n_samples=500_000):
     Parameters
     ----------
     sampler : object with a sample(size) method
-        Provides sampled dihedral angles (radians) in [-pi, pi].
+        Provides sampled dihedral angles (radians). Angles are periodic and
+        are wrapped into [-pi, pi).
     n_bins : int, default 100
         Number of evenly spaced phi points from -pi to pi.
     n_samples : int, default 500000
@@ -428,9 +431,9 @@ def dihedral_table_from_sampler(sampler, n_bins=100, n_samples=500_000):
         length n_bins, ready for hoomd.md.dihedral.Table.
     """
     phi = np.linspace(-math.pi, math.pi, n_bins)
-    samples = np.clip(
-        np.asarray(sampler.sample(size=n_samples), dtype=float), -math.pi, math.pi
-    )
+    samples = (
+        np.asarray(sampler.sample(size=n_samples), dtype=float) + math.pi
+    ) % (2 * math.pi) - math.pi
     density, edges = np.histogram(
         samples, bins=n_bins, range=(-math.pi, math.pi), density=True
     )
