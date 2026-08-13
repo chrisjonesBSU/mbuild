@@ -301,17 +301,85 @@ class AnglesSampler:
         self.distribution = distribution
         self.kwargs = kwargs
 
+    @classmethod
+    def from_energies(cls, angles, energies, temperature=300.0, rng=None):
+        """Create a sampler that draws angles weighted by a tabulated energy.
+
+        Parameters
+        ----------
+        angles : array-like (N,), required
+            Angle values in radians.
+        energies : array-like (N,), required
+            Energy of each angle in kJ/mol. Values of np.inf are never sampled.
+        temperature : float, default 300.0
+            Temperature in Kelvin used to weight the energies.
+        rng : numpy.random.Generator, optional
+            Defaults to numpy.random.default_rng().
+
+        Returns
+        -------
+        AnglesSampler
+            A sampler over the "choice" distribution, drawing values from
+            `angles`. Only the given angle values are returned, so the grid
+            sets the resolution of the sampled distribution.
+        """
+        angles = np.asarray(angles, dtype=float)
+        if angles.ndim != 1:
+            raise ValueError("angles must be 1D.")
+        weights = boltzmann_weights(energies, temperature)
+        if weights.shape != angles.shape:
+            raise ValueError(
+                f"energies has shape {weights.shape}, expected {angles.shape} "
+                "to match angles."
+            )
+        return cls("choice", {"a": angles, "p": weights}, rng=rng)
+
     def sample(self, size=None):
         # Resolve against self.rng at call time so the rng can be swapped in.
         return getattr(self.rng, self.distribution)(size=size, **self.kwargs)
 
 
-class JointAnglesSampler:
-    """Samples correlated bending angle and dihedral pairs from an energy table.
+def boltzmann_weights(energies, temperature):
+    """Normalized Boltzmann weights for a tabulated energy.
+
+    Parameters
+    ----------
+    energies : array-like, required
+        Energies in kJ/mol. Values of np.inf are given zero weight.
+    temperature : float, required
+        Temperature in Kelvin.
+
+    Returns
+    -------
+    numpy.ndarray
+        Weights summing to 1, with the same shape as `energies`.
+    """
+    energies = np.asarray(energies, dtype=float)
+    temperature = float(temperature)
+    if temperature <= 0:
+        raise ValueError(f"{temperature=} must be greater than 0.")
+    finite = np.isfinite(energies)
+    if not finite.any():
+        raise ValueError("energies has no finite values to sample from.")
+    shifted = energies - energies[finite].min()
+    weights = np.where(finite, np.exp(-shifted / (GAS_CONSTANT * temperature)), 0.0)
+    total = weights.sum()
+    if total <= 0:
+        raise ValueError(
+            "All weights underflowed to 0. The energy table spans too large a "
+            "range for this temperature."
+        )
+    return weights / total
+
+
+class AngleDihedralSampler:
+    """Samples bending angle and dihedral pairs from a 2D energy table.
 
     Draws a cell from a 2D grid of bending angles and dihedrals with
     probability proportional to exp(-E / RT), then returns an angle pair
-    from within that cell.
+    from within that cell. Correlation between the two comes from the
+    energy table, so a table that is additive in angle and dihedral
+    samples them independently.
 
     Parameters
     ----------
@@ -323,8 +391,7 @@ class JointAnglesSampler:
         Energy of each (theta, phi) cell in kJ/mol. Cells set to np.inf
         are never sampled.
     temperature : float, default 300.0
-        Temperature in Kelvin used to weight the energies. Assigning to
-        this attribute recomputes the weights from the same energy table.
+        Temperature in Kelvin used to weight the energies.
     jitter : bool, default True
         Draw uniformly within the selected cell. When False, the bin
         centers are returned.
@@ -363,41 +430,8 @@ class JointAnglesSampler:
         self._theta_edges = _bin_edges(self.theta_grid)
         self._phi_edges = _bin_edges(self.phi_grid)
         self.jitter = bool(jitter)
-        self._temperature = None
-        self.weights = None
-        self._flat_weights = None
-        # Assigning through the property validates and fills the weights
-        self.temperature = temperature
-
-    @property
-    def temperature(self):
-        """Temperature in Kelvin used to weight the energy table."""
-        return self._temperature
-
-    @temperature.setter
-    def temperature(self, value):
-        value = float(value)
-        if value <= 0:
-            raise ValueError(f"{value=} must be greater than 0.")
-        self._temperature = value
-        self._update_weights()
-
-    def _update_weights(self):
-        """Recompute cell probabilities from the energy table."""
-        finite = np.isfinite(self.energies)
-        if not finite.any():
-            raise ValueError("energies has no finite cells to sample from.")
-        shifted = self.energies - self.energies[finite].min()
-        weights = np.where(
-            finite, np.exp(-shifted / (GAS_CONSTANT * self._temperature)), 0.0
-        )
-        total = weights.sum()
-        if total <= 0:
-            raise ValueError(
-                "All cell weights underflowed to 0. The energy table spans too "
-                "large a range for this temperature."
-            )
-        self.weights = weights / total
+        self.temperature = float(temperature)
+        self.weights = boltzmann_weights(self.energies, self.temperature)
         self._flat_weights = self.weights.ravel()
 
     def sample(self, size=None):

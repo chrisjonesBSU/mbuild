@@ -500,9 +500,9 @@ class TestRandomWalk(BaseTest):
         assert np.allclose(path1.coordinates, path2.coordinates, atol=1e-7)
 
     def test_joint_sampler_with_dihedrals_raises(self):
-        from mbuild.path.points import JointAnglesSampler
+        from mbuild.path.points import AngleDihedralSampler
 
-        sampler = JointAnglesSampler(
+        sampler = AngleDihedralSampler(
             np.radians([100.0, 140.0]), np.radians([-90.0, 90.0]), np.zeros((2, 2))
         )
         with pytest.raises(ValueError):
@@ -1027,7 +1027,7 @@ class TestPathUtils(BaseTest):
         assert p_value > 0.05
 
     def test_joint_angles_sampler_correlates(self):
-        from mbuild.path.points import JointAnglesSampler
+        from mbuild.path.points import AngleDihedralSampler
 
         # Only two cells are favorable, each pairing one theta with one phi
         theta_grid = np.radians(np.array([100.0, 120.0, 140.0, 160.0]))
@@ -1035,7 +1035,7 @@ class TestPathUtils(BaseTest):
         energies = np.full((4, 6), 50.0)
         energies[0, 4] = 0.0
         energies[3, 0] = 0.0
-        sampler = JointAnglesSampler(
+        sampler = AngleDihedralSampler(
             theta_grid, phi_grid, energies, rng=np.random.default_rng(0)
         )
         thetas, phis = sampler.sample(size=5000)
@@ -1045,26 +1045,42 @@ class TestPathUtils(BaseTest):
         assert np.abs(open_.mean() + 150) < 10
 
     def test_joint_angles_sampler_temperature(self):
-        from mbuild.path.points import JointAnglesSampler
+        from mbuild.path.points import AngleDihedralSampler
 
         theta_grid = np.radians(np.array([100.0, 140.0]))
         phi_grid = np.radians(np.array([-90.0, 90.0]))
         energies = np.array([[0.0, 50.0], [50.0, 50.0]])
-        sampler = JointAnglesSampler(
-            theta_grid, phi_grid, energies, rng=np.random.default_rng(0)
-        )
+        kwargs = dict(rng=np.random.default_rng(0))
         # The cold cell dominates at low temperature and flattens at high
-        assert sampler.weights[0, 0] > 0.99
-        sampler.temperature = 1e6
-        assert np.allclose(sampler.weights, 0.25, atol=0.01)
+        cold = AngleDihedralSampler(theta_grid, phi_grid, energies, **kwargs)
+        assert cold.weights[0, 0] > 0.99
+        hot = AngleDihedralSampler(
+            theta_grid, phi_grid, energies, temperature=1e6, **kwargs
+        )
+        assert np.allclose(hot.weights, 0.25, atol=0.01)
         with pytest.raises(ValueError):
-            sampler.temperature = 0
+            AngleDihedralSampler(
+                theta_grid, phi_grid, energies, temperature=0, **kwargs
+            )
+
+    def test_angles_sampler_from_energies(self):
+        angles = np.radians(np.array([60.0, 90.0, 120.0, 150.0]))
+        energies = np.array([50.0, 0.0, 50.0, np.inf])
+        sampler = AnglesSampler.from_energies(
+            angles, energies, rng=np.random.default_rng(0)
+        )
+        samples = sampler.sample(20000)
+        # The zero-energy angle dominates and the infinite one never appears
+        assert np.abs(np.degrees(samples).mean() - 90) < 1
+        assert not np.any(np.isclose(samples, np.radians(150.0)))
+        with pytest.raises(ValueError):
+            AnglesSampler.from_energies(angles, energies[:2])
 
     def test_joint_angles_sampler_bad_shape(self):
-        from mbuild.path.points import JointAnglesSampler
+        from mbuild.path.points import AngleDihedralSampler
 
         with pytest.raises(ValueError):
-            JointAnglesSampler(np.zeros(3), np.zeros(4), np.zeros((4, 3)))
+            AngleDihedralSampler(np.zeros(3), np.zeros(4), np.zeros((4, 3)))
 
     @pytest.mark.parametrize("axis", [0, 1, 2])
     def test_check_path_pbc_overlap_across_face(self, axis):

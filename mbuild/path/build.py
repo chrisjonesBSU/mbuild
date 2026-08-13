@@ -18,8 +18,8 @@ from mbuild.path.path_utils import (
     random_coordinate,
 )
 from mbuild.path.points import (
+    AngleDihedralSampler,
     AnglesSampler,
-    JointAnglesSampler,
     generate_trials,
     get_initial_point,
     get_second_point,
@@ -1044,7 +1044,7 @@ def hard_sphere_random_walk(
         use a Gaussian distribution by passing a dict with keys {'loc':mean, 'scale':std}.
         Finally, a numpy array of 1D or 2D array of numpy values can be passed, which will be sampled
         via numpy.random.choice method. The 2D case provides a set of weights.
-        Pass a mbuild.path.points.JointAnglesSampler to sample correlated
+        Pass a mbuild.path.points.AngleDihedralSampler to sample correlated
         bending angle and dihedral pairs, in which case `rw_dihedrals` must be None.
     rw_dihedrals : tuple or dict or np.array or AnglesSampler, default None
         Set the dihedral sampling method for the angle formed by 4 consecutive
@@ -1520,12 +1520,12 @@ class RandomWalkState:
         if rng is None:
             rng = np.random.default_rng(seed + previous_count)
         self.rng = rng
-        # A JointAnglesSampler supplies both angles and dihedrals together
-        if isinstance(angles_sampler, JointAnglesSampler):
+        # An AngleDihedralSampler supplies both angles and dihedrals together
+        if isinstance(angles_sampler, AngleDihedralSampler):
             if dihedrals_sampler is not None:
                 raise ValueError(
-                    "A JointAnglesSampler already samples dihedrals. Pass either "
-                    "a JointAnglesSampler, or separate angle and dihedral samplers."
+                    "An AngleDihedralSampler already samples dihedrals. Pass either "
+                    "an AngleDihedralSampler, or separate angle and dihedral samplers."
                 )
             self.joint_angles = angles_sampler
             self.joint_angles.rng = self.rng
