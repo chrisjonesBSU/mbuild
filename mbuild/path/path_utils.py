@@ -14,6 +14,8 @@ def random_coordinate(
     bond_length,
     thetas,
     r_vectors,
+    pos3=None,
+    phis=None,
 ):
     """Default next_step method for HardSphereRandomWalk.
     This method takes in a a batch of thetas and vectors
@@ -32,6 +34,14 @@ def random_coordinate(
         coordinates relative to pos2-pos1-new angle
     r_vectors : array-like (N, 3), required
         A set of normal vectors used perform rotations around.
+    pos3 : np.ndarray (1,3), optional
+        The coordinate of the site placed before pos2. Used with `phis` to
+        set the pos3-pos2-pos1-new dihedral of the new coordinates.
+    phis : array-like (N, 1), optional
+        A set of dihedral angles in radians. When `phis` and `pos3` are both
+        given, the rotation about the pos2-pos1 axis is set by these angles
+        instead of by `r_vectors`. Uses `r_vectors` when pos3, pos2 and pos1
+        are colinear.
     """
 
     if pos1 is None:  # pick random point in sphere.
@@ -40,6 +50,27 @@ def random_coordinate(
     # pos1 and pos2 are defined, use available angles to sample new coordinates
     v1 = pos2 - pos1
     v1_norm = v1 / norm(v1)
+    if pos3 is not None and phis is not None:
+        b1 = pos2 - pos3
+        b2 = -v1_norm
+        n = np.empty(3, dtype=np.float64)
+        n[0] = b1[1] * b2[2] - b1[2] * b2[1]
+        n[1] = b1[2] * b2[0] - b1[0] * b2[2]
+        n[2] = b1[0] * b2[1] - b1[1] * b2[0]
+        n_len = norm(n)
+        if n_len > 1e-6:
+            n = n / n_len
+            m = np.empty(3, dtype=np.float64)
+            m[0] = n[1] * b2[2] - n[2] * b2[1]
+            m[1] = n[2] * b2[0] - n[0] * b2[2]
+            m[2] = n[0] * b2[1] - n[1] * b2[0]
+            cos_p = np.cos(phis)
+            sin_p = np.sin(phis)
+            perp = cos_p[:, None] * m + sin_p[:, None] * n
+            cos_t = np.cos(thetas)
+            sin_t = np.sin(thetas)
+            v2s = cos_t[:, None] * v1_norm + sin_t[:, None] * perp
+            return (pos1 + v2s * bond_length).astype(np.float32)
     dot_products = (r_vectors * v1_norm).sum(axis=1)
     r_perp = r_vectors - dot_products[:, None] * v1_norm
     norms = np.sqrt((r_perp * r_perp).sum(axis=1))

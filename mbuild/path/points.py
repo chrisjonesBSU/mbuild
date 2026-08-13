@@ -7,6 +7,9 @@ from mbuild.path.constraints import CuboidConstraint, CylinderConstraint
 
 logger = logging.getLogger(__name__)
 
+# Molar gas constant in kJ/mol/K
+GAS_CONSTANT = 8.314462618e-3
+
 
 def get_second_point(state, existing_points, beads, check_path, next_step):
     """Generate a secound point from the given first point using RandomWalkState.
@@ -42,7 +45,7 @@ def get_second_point(state, existing_points, beads, check_path, next_step):
         found within the trial batch.
 
     """
-    batch_angles, batch_vectors = generate_trials(state)
+    batch_angles, _, batch_vectors = generate_trials(state)
     # If this RW is using link linear, pos2 = last site of last
     # Set pos1 and pos2 before checking include compound and combining coordinates
     if state.connectivity == "link-linear" and len(existing_points) > 1:
@@ -172,7 +175,7 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
             )
         # generate point off of current path coordinates
         starting_xyz = existing_points[state.initial_point]
-        batch_angles, batch_vectors = generate_trials(state)
+        batch_angles, _, batch_vectors = generate_trials(state)
         # TODO: If building from a path with coordinates, can we try to get both pos1 and pos2?
         xyzs = next_step(
             pos1=None,  # will generate sphere of points around pos2
@@ -303,13 +306,148 @@ class AnglesSampler:
         return getattr(self.rng, self.distribution)(size=size, **self.kwargs)
 
 
+class JointAnglesSampler:
+    """Samples correlated bending angle and dihedral pairs from an energy table.
+
+    Draws a cell from a 2D grid of bending angles and dihedrals with
+    probability proportional to exp(-E / RT), then returns an angle pair
+    from within that cell.
+
+    Parameters
+    ----------
+    theta_grid : array-like (N,), required
+        Bending angle bin centers in radians.
+    phi_grid : array-like (M,), required
+        Dihedral bin centers in radians, spanning [-pi, pi).
+    energies : array-like (N, M), required
+        Energy of each (theta, phi) cell in kJ/mol. Cells set to np.inf
+        are never sampled.
+    temperature : float, default 300.0
+        Temperature in Kelvin used to weight the energies. Assigning to
+        this attribute recomputes the weights from the same energy table.
+    jitter : bool, default True
+        Draw uniformly within the selected cell. When False, the bin
+        centers are returned.
+    rng : numpy.random.Generator, optional
+        Defaults to numpy.random.default_rng().
+
+    Notes
+    -----
+    Bin edges are the midpoints between neighboring grid values, so
+    non-uniform grids are supported.
+    """
+
+    def __init__(
+        self,
+        theta_grid,
+        phi_grid,
+        energies,
+        temperature=300.0,
+        jitter=True,
+        rng=None,
+    ):
+        self.rng = rng if rng is not None else np.random.default_rng()
+        self.theta_grid = np.asarray(theta_grid, dtype=float)
+        self.phi_grid = np.asarray(phi_grid, dtype=float)
+        self.energies = np.asarray(energies, dtype=float)
+        if self.theta_grid.ndim != 1 or self.phi_grid.ndim != 1:
+            raise ValueError("theta_grid and phi_grid must be 1D.")
+        if self.theta_grid.size < 2 or self.phi_grid.size < 2:
+            raise ValueError("theta_grid and phi_grid need at least 2 values each.")
+        expected = (self.theta_grid.size, self.phi_grid.size)
+        if self.energies.shape != expected:
+            raise ValueError(
+                f"energies has shape {self.energies.shape}, expected {expected} "
+                "to match (theta_grid, phi_grid)."
+            )
+        self._theta_edges = _bin_edges(self.theta_grid)
+        self._phi_edges = _bin_edges(self.phi_grid)
+        self.jitter = bool(jitter)
+        self._temperature = None
+        self.weights = None
+        self._flat_weights = None
+        # Assigning through the property validates and fills the weights
+        self.temperature = temperature
+
+    @property
+    def temperature(self):
+        """Temperature in Kelvin used to weight the energy table."""
+        return self._temperature
+
+    @temperature.setter
+    def temperature(self, value):
+        value = float(value)
+        if value <= 0:
+            raise ValueError(f"{value=} must be greater than 0.")
+        self._temperature = value
+        self._update_weights()
+
+    def _update_weights(self):
+        """Recompute cell probabilities from the energy table."""
+        finite = np.isfinite(self.energies)
+        if not finite.any():
+            raise ValueError("energies has no finite cells to sample from.")
+        shifted = self.energies - self.energies[finite].min()
+        weights = np.where(
+            finite, np.exp(-shifted / (GAS_CONSTANT * self._temperature)), 0.0
+        )
+        total = weights.sum()
+        if total <= 0:
+            raise ValueError(
+                "All cell weights underflowed to 0. The energy table spans too "
+                "large a range for this temperature."
+            )
+        self.weights = weights / total
+        self._flat_weights = self.weights.ravel()
+
+    def sample(self, size=None):
+        """Return (thetas, phis) drawn from the weighted energy table."""
+        n = 1 if size is None else int(size)
+        flat = self.rng.choice(self._flat_weights.size, size=n, p=self._flat_weights)
+        i, j = np.unravel_index(flat, self.energies.shape)
+        if self.jitter:
+            thetas = self.rng.uniform(self._theta_edges[i], self._theta_edges[i + 1])
+            phis = self.rng.uniform(self._phi_edges[j], self._phi_edges[j + 1])
+        else:
+            thetas = self.theta_grid[i]
+            phis = self.phi_grid[j]
+        if size is None:
+            return thetas[0], phis[0]
+        return thetas, phis
+
+
+def _bin_edges(grid):
+    """Bin edges from grid centers, using midpoints between neighbors."""
+    edges = np.empty(grid.size + 1, dtype=float)
+    edges[1:-1] = 0.5 * (grid[:-1] + grid[1:])
+    edges[0] = grid[0] - (edges[1] - grid[0])
+    edges[-1] = grid[-1] + (grid[-1] - edges[-2])
+    return edges
+
+
 def generate_trials(state):
-    """Use normal or uniform sampling on angles, uniform sampling on radius."""
-    thetas = state.angles.sample(size=state.trial_batch_size).astype(np.float32)
-    r = state.rng.uniform(-0.5, 0.5, size=(state.trial_batch_size, 3)).astype(
-        np.float32
-    )
-    return thetas, r
+    """Use normal or uniform sampling on angles, isotropic sampling on radius.
+
+    Returns
+    -------
+    thetas, phis, r_vectors
+        `phis` is None when the walk has no dihedral sampler, which leaves
+        the rotation about the last bond set by `r_vectors`.
+    """
+    if state.joint_angles is not None:
+        thetas, phis = state.joint_angles.sample(size=state.trial_batch_size)
+        thetas = thetas.astype(np.float32)
+        phis = phis.astype(np.float32)
+    else:
+        thetas = state.angles.sample(size=state.trial_batch_size).astype(np.float32)
+        if state.dihedrals is not None:
+            phis = state.dihedrals.sample(size=state.trial_batch_size).astype(
+                np.float32
+            )
+        else:
+            phis = None
+    r = state.rng.normal(size=(state.trial_batch_size, 3)).astype(np.float32)
+    return thetas, phis, r
 
 
 def generate_crosslink_init_points():

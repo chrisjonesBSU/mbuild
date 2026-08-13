@@ -255,6 +255,20 @@ class TestPaths(BaseTest):
         assert list(path.beads) == ["_X", "_X", "_X", "_X"]
 
 
+def _path_dihedrals(coordinates):
+    """Dihedral angles in degrees for consecutive sites along a linear path."""
+    bonds = np.diff(coordinates, axis=0)
+    normals = np.cross(bonds[:-1], bonds[1:])
+    normals /= np.clip(np.linalg.norm(normals, axis=1), 1e-12, None)[:, None]
+    axes = bonds[1:-1] / np.linalg.norm(bonds[1:-1], axis=1)[:, None]
+    return np.degrees(
+        np.arctan2(
+            (np.cross(normals[:-1], normals[1:]) * axes).sum(axis=1),
+            (normals[:-1] * normals[1:]).sum(axis=1),
+        )
+    )
+
+
 class TestRandomWalk(BaseTest):
     def test_extend_coordinates(self):
         path = Path()
@@ -463,6 +477,43 @@ class TestRandomWalk(BaseTest):
             **kwargs,
         )
         assert np.allclose(path1.coordinates, path2.coordinates, atol=1e-7)
+
+    def test_rw_dihedrals_sets_torsion(self):
+        # A tightly peaked dihedral sampler should show up in the path geometry
+        path = hard_sphere_random_walk(
+            bead_name="A",
+            bond_length=0.25,
+            radius=0.1,
+            termination=60,
+            seed=3,
+            rw_angles={"loc": 2.4, "scale": 0.05},
+            rw_dihedrals={"loc": np.pi, "scale": 0.05},
+        )
+        phis = _path_dihedrals(path.coordinates)
+        assert np.abs(np.abs(phis).mean() - 180) < 5
+
+    def test_rw_dihedrals_default_unchanged(self):
+        # Omitting rw_dihedrals must reproduce the walk exactly
+        kwargs = dict(bead_name="A", bond_length=0.25, radius=0.1, seed=3)
+        path1 = hard_sphere_random_walk(termination=60, **kwargs)
+        path2 = hard_sphere_random_walk(termination=60, rw_dihedrals=None, **kwargs)
+        assert np.allclose(path1.coordinates, path2.coordinates, atol=1e-7)
+
+    def test_joint_sampler_with_dihedrals_raises(self):
+        from mbuild.path.points import JointAnglesSampler
+
+        sampler = JointAnglesSampler(
+            np.radians([100.0, 140.0]), np.radians([-90.0, 90.0]), np.zeros((2, 2))
+        )
+        with pytest.raises(ValueError):
+            hard_sphere_random_walk(
+                bead_name="A",
+                bond_length=0.25,
+                radius=0.1,
+                termination=10,
+                rw_angles=sampler,
+                rw_dihedrals=(0, 1),
+            )
 
     def test_seeds_random_namer(self):
         # An unseeded stochastic namer is driven by the walk's seed, so
@@ -974,6 +1025,46 @@ class TestPathUtils(BaseTest):
             _, p_value = scipy.stats.normaltest(points)
 
         assert p_value > 0.05
+
+    def test_joint_angles_sampler_correlates(self):
+        from mbuild.path.points import JointAnglesSampler
+
+        # Only two cells are favorable, each pairing one theta with one phi
+        theta_grid = np.radians(np.array([100.0, 120.0, 140.0, 160.0]))
+        phi_grid = np.radians(np.array([-150.0, -90.0, -30.0, 30.0, 90.0, 150.0]))
+        energies = np.full((4, 6), 50.0)
+        energies[0, 4] = 0.0
+        energies[3, 0] = 0.0
+        sampler = JointAnglesSampler(
+            theta_grid, phi_grid, energies, rng=np.random.default_rng(0)
+        )
+        thetas, phis = sampler.sample(size=5000)
+        tight = np.degrees(phis[np.abs(np.degrees(thetas) - 100) < 10])
+        open_ = np.degrees(phis[np.abs(np.degrees(thetas) - 160) < 10])
+        assert np.abs(tight.mean() - 90) < 10
+        assert np.abs(open_.mean() + 150) < 10
+
+    def test_joint_angles_sampler_temperature(self):
+        from mbuild.path.points import JointAnglesSampler
+
+        theta_grid = np.radians(np.array([100.0, 140.0]))
+        phi_grid = np.radians(np.array([-90.0, 90.0]))
+        energies = np.array([[0.0, 50.0], [50.0, 50.0]])
+        sampler = JointAnglesSampler(
+            theta_grid, phi_grid, energies, rng=np.random.default_rng(0)
+        )
+        # The cold cell dominates at low temperature and flattens at high
+        assert sampler.weights[0, 0] > 0.99
+        sampler.temperature = 1e6
+        assert np.allclose(sampler.weights, 0.25, atol=0.01)
+        with pytest.raises(ValueError):
+            sampler.temperature = 0
+
+    def test_joint_angles_sampler_bad_shape(self):
+        from mbuild.path.points import JointAnglesSampler
+
+        with pytest.raises(ValueError):
+            JointAnglesSampler(np.zeros(3), np.zeros(4), np.zeros((4, 3)))
 
     @pytest.mark.parametrize("axis", [0, 1, 2])
     def test_check_path_pbc_overlap_across_face(self, axis):

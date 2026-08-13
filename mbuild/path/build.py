@@ -19,6 +19,7 @@ from mbuild.path.path_utils import (
 )
 from mbuild.path.points import (
     AnglesSampler,
+    JointAnglesSampler,
     generate_trials,
     get_initial_point,
     get_second_point,
@@ -1007,6 +1008,7 @@ def hard_sphere_random_walk(
     bond_length=0.15,
     radius=0.1,
     rw_angles=None,
+    rw_dihedrals=None,
     termination=None,
     volume_constraint=None,
     bias=None,
@@ -1042,6 +1044,13 @@ def hard_sphere_random_walk(
         use a Gaussian distribution by passing a dict with keys {'loc':mean, 'scale':std}.
         Finally, a numpy array of 1D or 2D array of numpy values can be passed, which will be sampled
         via numpy.random.choice method. The 2D case provides a set of weights.
+        Pass a mbuild.path.points.JointAnglesSampler to sample correlated
+        bending angle and dihedral pairs, in which case `rw_dihedrals` must be None.
+    rw_dihedrals : tuple or dict or np.array or AnglesSampler, default None
+        Set the dihedral sampling method for the angle formed by 4 consecutive
+        points, in radians over [-pi, pi). Accepts the same forms as `rw_angles`.
+        The default of None leaves the rotation about the last bond unconstrained.
+        Applies from the fourth site of a walk onward.
     termination : termination condition, required
         Termination condition for the random walk. If an integer is passed,
         will terminate after reaching that number of sites. Can also pass a tuple of
@@ -1085,6 +1094,7 @@ def hard_sphere_random_walk(
         bond_length=bond_length,
         radius=radius,
         angles_sampler=rw_angles,
+        dihedrals_sampler=rw_dihedrals,
         bead_name=bead_name,
         initial_point=initial_point,
         previous_count=previous_count,
@@ -1245,13 +1255,21 @@ def hard_sphere_random_walk(
     # Main random walk loop
     walk_finished = False
     while not walk_finished:
-        batch_angles, batch_vectors = generate_trials(state)
+        batch_angles, batch_phis, batch_vectors = generate_trials(state)
+        # A dihedral needs the site before pos2 to define a reference plane
+        if batch_phis is not None and state.count - state.init_count >= 3:
+            pos3 = coordinates[state.count - 3]
+        else:
+            pos3 = None
+            batch_phis = None
         candidates = next_step(
             pos1=coordinates[state.count - 1],
             pos2=coordinates[state.count - 2],
             bond_length=bond_length,
             thetas=batch_angles,
             r_vectors=batch_vectors,
+            pos3=pos3,
+            phis=batch_phis,
         )
         # Create mask for particles inside volume constraint, allows for PBC
         if state.volume_constraint:
@@ -1326,6 +1344,60 @@ def hard_sphere_random_walk(
     state.check_termination(path, coordinates, beads)
 
     return path
+
+
+def _coerce_sampler(sampler, rng, name):
+    """Build an AnglesSampler from the supported shorthand forms.
+
+    Parameters
+    ----------
+    sampler : tuple, list, dict, np.ndarray or AnglesSampler, required
+        A 2 element sequence sets a uniform distribution over (low, high).
+        A dict of {'loc', 'scale'} sets a normal distribution and a dict of
+        {'low', 'high'} sets a uniform one. A 1D array is a set of choices
+        and a 2D array is a set of choices with weights. An AnglesSampler
+        is returned with its rng replaced.
+    rng : numpy.random.Generator, required
+        The random walk's generator, shared with the returned sampler.
+    name : str, required
+        Used in error messages to name the quantity being sampled.
+
+    Returns
+    -------
+    mbuild.path.points.AnglesSampler
+    """
+    if isinstance(sampler, (tuple, list)) and len(sampler) == 2:
+        return AnglesSampler(
+            "uniform", {"low": sampler[0], "high": sampler[1]}, rng=rng
+        )
+    elif isinstance(sampler, dict):
+        if "loc" in sampler and "scale" in sampler:
+            return AnglesSampler("normal", sampler, rng=rng)
+        elif "low" in sampler and "high" in sampler:
+            return AnglesSampler("uniform", sampler, rng=rng)
+        raise ValueError(
+            f"kwargs {sampler} cannot be used to create an "
+            "AnglesSampler. Pass either {'loc': mean, 'scale': std} for "
+            "a normal distribution, or {'low': min, 'high': max} for a "
+            "uniform distribution."
+        )
+    elif isinstance(sampler, np.ndarray):
+        if sampler.ndim == 1:
+            kwargs = {"a": sampler}
+        elif sampler.ndim == 2:
+            kwargs = {"a": sampler[0], "p": sampler[1]}
+        else:
+            raise ValueError(
+                f"Sampling {name} from an array of choices is only supported for 1D and 2D arrays."
+            )
+        return AnglesSampler("choice", kwargs, rng=rng)
+    elif isinstance(sampler, AnglesSampler):
+        sampler.rng = rng
+        return sampler
+    raise ValueError(
+        f"{sampler} is not a supported form to sample {name}. "
+        "See mbuild.path.points.AnglesSampler."
+    )
 
 
 def _normalize_initial_point(initial_point):
@@ -1422,6 +1494,7 @@ class RandomWalkState:
         radius,
         angles_sampler,
         bead_name,
+        dihedrals_sampler=None,
         initial_point=None,
         previous_count=0,
         connectivity=None,
@@ -1447,51 +1520,29 @@ class RandomWalkState:
         if rng is None:
             rng = np.random.default_rng(seed + previous_count)
         self.rng = rng
-        # Multiple ways to handle angles_sampler arg:
-        if angles_sampler is None:
-            self.angles = AnglesSampler(
-                "uniform", {"low": np.pi / 2, "high": np.pi}, rng=self.rng
-            )
-        # Pass in a tupe or list of (low, high)
-        elif isinstance(angles_sampler, (tuple, list)) and len(angles_sampler) == 2:
-            self.angles = AnglesSampler(
-                "uniform",
-                {"low": angles_sampler[0], "high": angles_sampler[1]},
-                rng=self.rng,
-            )
-        # Pass in a dict with supported kwargs
-        elif isinstance(angles_sampler, dict):
-            if "loc" in angles_sampler and "scale" in angles_sampler:
-                self.angles = AnglesSampler("normal", angles_sampler, rng=self.rng)
-            elif "low" in angles_sampler and "high" in angles_sampler:
-                self.angles = AnglesSampler("uniform", angles_sampler, rng=self.rng)
-            else:
+        # A JointAnglesSampler supplies both angles and dihedrals together
+        if isinstance(angles_sampler, JointAnglesSampler):
+            if dihedrals_sampler is not None:
                 raise ValueError(
-                    f"kwargs {angles_sampler} cannot be used to create an "
-                    "AnglesSampler. Pass either {'loc': mean, 'scale': std} for "
-                    "a normal distribution, or {'low': min, 'high': max} for a "
-                    "uniform distribution."
+                    "A JointAnglesSampler already samples dihedrals. Pass either "
+                    "a JointAnglesSampler, or separate angle and dihedral samplers."
                 )
-        # Pass in an array of choices
-        elif isinstance(angles_sampler, np.ndarray):
-            if angles_sampler.ndim == 1:
-                kwargs = {"a": angles_sampler}
-            elif angles_sampler.ndim == 2:
-                kwargs = {"a": angles_sampler[0], "p": angles_sampler[1]}
-            else:
-                raise ValueError(
-                    "Sampling angles from an array of choices is only supported for 1D and 2D arrays."
-                )
-            self.angles = AnglesSampler("choice", kwargs, rng=self.rng)
-        # Pass in an AnglesSampler instance.
-        elif isinstance(angles_sampler, AnglesSampler):
-            self.angles = angles_sampler
-            self.angles.rng = self.rng
+            self.joint_angles = angles_sampler
+            self.joint_angles.rng = self.rng
+            self.angles = None
+            self.dihedrals = None
         else:
-            raise ValueError(
-                f"{angles_sampler} is not a supported form to sample angles. "
-                "See mbuild.path.points.AnglesSampler."
-            )
+            self.joint_angles = None
+            # Default bending angles are uniform over (pi/2, pi)
+            if angles_sampler is None:
+                angles_sampler = {"low": np.pi / 2, "high": np.pi}
+            self.angles = _coerce_sampler(angles_sampler, self.rng, "angles")
+            if dihedrals_sampler is None:
+                self.dihedrals = None
+            else:
+                self.dihedrals = _coerce_sampler(
+                    dihedrals_sampler, self.rng, "dihedrals"
+                )
         self.bead_name = bead_name
         self.initial_point, self.starting_from_site = _normalize_initial_point(
             initial_point
