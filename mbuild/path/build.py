@@ -28,6 +28,9 @@ from mbuild.path.termination import NumSites, Termination, Terminator
 
 logger = logging.getLogger(__name__)
 
+# Passed to check_path when no existing site is bonded to the candidate.
+NO_EXCLUDED_INDICES = np.empty(0, dtype=np.int64)
+
 
 class Path:
     """Creates a path from a given set of coordinates and a bond graph.
@@ -426,6 +429,7 @@ class Path:
         angles_sampler=None,
         steps=1000,
         seed=1,
+        run_on_gpu=False,
     ):
         """Relax the path with a coarse Kremer-Grest forcefield.
 
@@ -448,6 +452,11 @@ class Path:
             Number of FIRE minimization steps.
         seed : int, optional, default 1
             Random seed for the simulation.
+        run_on_gpu : bool, default False
+            If True, HOOMD will attempt to run on the GPU if the user has
+            a GPU compatible version of HOOMD installed, and a compatible
+            GPU available. If one isn't found, it will revert to the CPU.
+            if False, HOOMD will run on the CPU.
         """
         import mbuild.simulation
         from mbuild.utils.simulation.path_forces import (
@@ -465,7 +474,7 @@ class Path:
             radius=bead_radius, bond_length=bond_length, angles=angles_sampler
         )
         sim = mbuild.simulation.HoomdSimulation(
-            self, forcefield=forcefield, seed=seed, run_on_gpu=False
+            self, forcefield=forcefield, seed=seed, run_on_gpu=run_on_gpu
         )
         sim.cap_displacement(n_steps=500, dt=1, max_displacement=0.01 * bond_eff)
         sim.fire(n_steps=steps)
@@ -1019,7 +1028,6 @@ def hard_sphere_random_walk(
     trial_batch_size=20,
     tolerance=1e-5,
     chunk_size=512,
-    run_on_gpu=False,
 ):
     """Generates coordinates from a self avoiding random walk using
     fixed bond lengths, hard spheres, and minimum and maximum angles
@@ -1078,9 +1086,6 @@ def hard_sphere_random_walk(
         Tolerance used for rounding and checking for overlaps.
     chunk_size : int, default = 512
         Size of coordinate chunks to allocate
-    run_on_gpu : bool, default = False
-        If True and CUDA path utilities are available, use GPU-accelerated
-        implementations.
     """
     # Create seed sequence used by multiple path classes
     # The namer seed is separate, so that coordinates are impacted by naming methods.
@@ -1105,7 +1110,6 @@ def hard_sphere_random_walk(
         tolerance=tolerance,
         trial_batch_size=int(trial_batch_size),
         chunk_size=chunk_size,
-        run_on_gpu=bool(run_on_gpu) and _get_cuda_available(),
         rng=rng,
     )
     if path is None:  # Create empty path
@@ -1180,14 +1184,6 @@ def hard_sphere_random_walk(
     state.init_count = state.count
 
     # Select methods for random walk
-    if state.run_on_gpu:
-        from mbuild.path.path_utils_gpu import check_path_split
-
-        logger.info("Running hard_sphere_random_walk on a CUDA device.")
-        check_path_gpu = check_path_split
-    else:
-        check_path_gpu = None
-
     check_path_cpu = check_path
     next_step = random_coordinate
 
@@ -1239,19 +1235,6 @@ def hard_sphere_random_walk(
     if state.check_termination(path, coordinates, beads):
         return path
 
-    # Prepare GPU static points if using GPU
-    if state.run_on_gpu:
-        from numba import cuda
-
-        static_parts = []
-        if state.init_count > 0:
-            static_parts.append(coordinates[: state.init_count])
-        if include_compound:
-            static_parts.append(include_compound.xyz)
-        if static_parts:
-            static_points = np.concatenate(static_parts).astype(np.float32)
-            state.gpu_static_points = cuda.to_device(static_points)
-
     # Main random walk loop
     walk_finished = False
     while not walk_finished:
@@ -1292,37 +1275,23 @@ def hard_sphere_random_walk(
             ).astype(np.float32)
         # Check candidate sites
         accept_xyz = None
-        if state.run_on_gpu and len(candidates) > 0:
-            # Run on GPU checks all candidates, choses the first accepted
-            dynamic_points = coordinates[state.init_count : state.count]
-            valid_mask = check_path_gpu(
-                state.gpu_static_points,
-                dynamic_points,
-                candidates,
-                radius,
-                tolerance,
+        existing_points = coordinates[: state.count]
+        if state.include_compound:  # Include compound's particle coordinates
+            existing_points = np.concat((existing_points, include_compound.xyz))
+        excluded_indices = state.excluded_indices()
+        # Iterate through current state of candidates, break after first accept
+        for xyz in candidates:
+            if check_path_cpu(
+                existing_points=existing_points,
+                new_point=xyz,
+                radius=radius,
+                tolerance=tolerance,
                 pbc=pbc,
                 box_lengths=box_lengths,
-            )
-            valid_candidates = candidates[valid_mask]
-            if len(valid_candidates) > 0:
-                accept_xyz = valid_candidates[0]
-        else:
-            existing_points = coordinates[: state.count]
-            if state.include_compound:  # Include compound's particle coordinates
-                existing_points = np.concat((existing_points, include_compound.xyz))
-            # Iterate through current state of candidates, break after first accept
-            for xyz in candidates:
-                if check_path_cpu(
-                    existing_points=existing_points,
-                    new_point=xyz,
-                    radius=radius,
-                    tolerance=tolerance,
-                    pbc=pbc,
-                    box_lengths=box_lengths,
-                ):
-                    accept_xyz = xyz
-                    break
+                excluded_indices=excluded_indices,
+            ):
+                accept_xyz = xyz
+                break
 
         if accept_xyz is not None:
             coordinates[state.count] = accept_xyz
@@ -1398,6 +1367,70 @@ def _coerce_sampler(sampler, rng, name):
         f"{sampler} is not a supported form to sample {name}. "
         "See mbuild.path.points.AnglesSampler."
     )
+=======
+def _angle_range(angles_sampler):
+    """Return the smallest and largest angle a sampler can produce.
+
+    Returns None for distributions with unbounded support.
+    """
+    if angles_sampler.distribution == "uniform":
+        return (
+            float(angles_sampler.kwargs["low"]),
+            float(angles_sampler.kwargs["high"]),
+        )
+    if angles_sampler.distribution == "choice":
+        angles = np.asarray(angles_sampler.kwargs["a"], dtype=float)
+        return float(angles.min()), float(angles.max())
+    return None
+
+
+def _check_angle_range(bond_length, radius, angles_sampler):
+    """Compare the sampled angle range against the angle radius allows.
+
+    Sites two bonds apart are separated by ``2 * bond_length * sin(theta / 2)``
+    for a bond angle theta, and are not excluded from the overlap check. Angles
+    below the critical angle place a new site within ``radius`` of the site two
+    bonds back, so those angles are always rejected.
+
+    Raises
+    ------
+    ValueError
+        If no angle in the sampled range can avoid the overlap.
+    """
+    ratio = radius / (2.0 * bond_length)
+    if ratio > 1.0:
+        raise ValueError(
+            f"A {radius=} larger than twice {bond_length=} leaves no bond angle "
+            "that avoids overlapping the site two bonds back. Reduce radius or "
+            "increase bond_length."
+        )
+    critical_angle = 2.0 * np.arcsin(ratio)
+    angle_range = _angle_range(angles_sampler)
+    if angle_range is None:
+        return
+    low, high = angle_range
+    if critical_angle >= high:
+        raise ValueError(
+            f"With {bond_length=} and {radius=}, bond angles below "
+            f"{np.degrees(critical_angle):.1f} degrees overlap the site two "
+            f"bonds back, which rejects every angle in the sampled range of "
+            f"{np.degrees(low):.1f} to {np.degrees(high):.1f} degrees. "
+            "Reduce radius, increase bond_length, or raise rw_angles."
+        )
+    if critical_angle > low:
+        if angles_sampler.distribution == "uniform":
+            fraction = (critical_angle - low) / (high - low)
+        else:
+            angles = np.asarray(angles_sampler.kwargs["a"], dtype=float)
+            fraction = float(np.mean(angles < critical_angle))
+        logger.warning(
+            f"With {bond_length=} and {radius=}, bond angles below "
+            f"{np.degrees(critical_angle):.1f} degrees overlap the site two "
+            f"bonds back. This rejects {fraction:.0%} of the sampled range "
+            f"starting at {np.degrees(low):.1f} degrees, biasing the walk "
+            "toward wider angles."
+        )
+>>>>>>> origin/rw-excl-bonded
 
 
 def _normalize_initial_point(initial_point):
@@ -1482,10 +1515,6 @@ class RandomWalkState:
         Number of trial moves per step
     chunk_size : int
         Size of coordinate chunks to allocate
-    run_on_gpu : bool
-        Whether GPU acceleration is being used
-    gpu_static_points : device array or None
-        GPU array of static points for overlap checking
     """
 
     def __init__(
@@ -1506,15 +1535,10 @@ class RandomWalkState:
         tolerance=1e-5,
         trial_batch_size=20,
         chunk_size=512,
-        run_on_gpu=False,
         rng=None,
     ):
         self.bond_length = bond_length
         self.radius = radius
-        if bond_length < radius:
-            raise ValueError(
-                "Bond length should be greater than radius to prevent overlaps."
-            )
         # Single RNG drives all walk randomness (angles, positions, bias,
         # volume-constraint sampling).
         if rng is None:
@@ -1557,18 +1581,63 @@ class RandomWalkState:
         self.bias = bias
         self.trial_batch_size = trial_batch_size
         self.chunk_size = chunk_size
-        self.run_on_gpu = run_on_gpu
+        _check_angle_range(bond_length, radius, self.angles)
 
         # State tracking
         self.count = 0
         self.init_count = 0
         self.attempts = 0
         self.start_time = None
-        self.gpu_static_points = None
         # PBC info for overlap checks; populated in hard_sphere_random_walk.
         # Defaults reproduce non-periodic behavior.
         self.pbc = np.array([False, False, False], dtype=np.bool_)
         self.box_lengths = np.array([np.inf, np.inf, np.inf], dtype=np.float32)
+
+    @property
+    def attaches_to_path(self):
+        """Whether the first site of this walk bonds to an existing site."""
+        return self.connectivity == "link-linear"
+
+    @property
+    def attach_index(self):
+        """Index of the existing site that the first site of this walk bonds to.
+
+        Returns -1 when the walk does not bond to an existing site.
+        """
+        if not self.attaches_to_path:
+            return -1
+        if self.starting_from_site:
+            return self.initial_point
+        return self.previous_count - 1
+
+    @property
+    def initial_point_distance(self):
+        """Distance from an existing site at which the first site is placed.
+
+        Uses the bond length when the first site bonds to that existing site.
+        Uses the larger of the bond length and the radius otherwise, so an
+        unbonded first site is placed no closer than contact.
+        """
+        if self.attaches_to_path:
+            return self.bond_length
+        return max(self.bond_length, self.radius)
+
+    def excluded_indices(self):
+        """Return indices of existing sites bonded to the next candidate.
+
+        Candidates are generated at the bond length from the site they bond
+        to, so that site is left out of the overlap check. Returns the last
+        accepted site once this walk has placed one, the attach site when
+        placing the first site of a walk that links to an existing path, and
+        an empty array when the next candidate has no bonded neighbor among
+        the existing sites.
+        """
+        if self.count > self.previous_count:
+            return np.array([self.count - 1], dtype=np.int64)
+        attach_index = self.attach_index
+        if attach_index < 0:
+            return NO_EXCLUDED_INDICES
+        return np.array([attach_index], dtype=np.int64)
 
     def check_termination(self, path, coordinates, beads):
         """Examine and process termination if we have reached.
@@ -1601,19 +1670,11 @@ class RandomWalkState:
             if self.bias:
                 self.bias._clean()
             path._extend_bond_graph()
-            if self.starting_from_site:
-                # build from the given site instead of the last point
-                path._connect_edges(
-                    self.connectivity,
-                    np.arange(self.previous_count, self.count),
-                    self.initial_point,
-                )
-            else:  # build bond graph, and connect to last index in previous path coordinates
-                path._connect_edges(
-                    self.connectivity,
-                    np.arange(self.previous_count, self.count),
-                    self.previous_count,
-                )
+            path._connect_edges(
+                self.connectivity,
+                np.arange(self.previous_count, self.count),
+                self.attach_index,
+            )
             # path._extend_beads(self.bead_name)
             return True
         return False
@@ -1630,7 +1691,6 @@ def crosslink(
     initial_point=None,
     seed=42,
     chunk_size=512,
-    run_on_gpu=False,
 ):
     """
     Create a crosslink node that bonds to n_connection_sites backbone beads.
@@ -1656,8 +1716,6 @@ def crosslink(
         Random seed for reproducibility
     chunk_size : int, default 512
         Chunk size for batch processing (used if extending coordinates)
-    run_on_gpu : bool, default False
-        Whether to use GPU acceleration via numba
 
     Returns
     -------
@@ -1752,7 +1810,6 @@ def crosslink(
     found_ref = False  # flag to check all ref_nodes
     for ref_node, ref_coord in zip(ref_nodes, ref_coords):
         selected_nodes = [ref_node]  # first choice is ref
-        # GPU-accelerated distance calculation
         sq_distances = calculate_sq_distances(
             ref_coord, candidate_coords, pbc=pbc, box_lengths=box_lengths
         )
@@ -1820,19 +1877,3 @@ def crosslink(
 class CrosslinkWalkState:
     # TODO
     pass
-
-
-_CUDA_AVAILABLE = None
-
-
-def _get_cuda_available():
-    """Check if numba can access CUDA runtime."""
-    global _CUDA_AVAILABLE
-    if _CUDA_AVAILABLE is None:
-        try:
-            from numba import cuda
-
-            _CUDA_AVAILABLE = cuda.is_available()
-        except Exception:
-            _CUDA_AVAILABLE = False
-    return _CUDA_AVAILABLE
