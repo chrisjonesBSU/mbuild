@@ -789,9 +789,7 @@ class TestFragmentTwist(BaseTest):
         )
 
     def _min_hydrogen_gap(self, compound):
-        xyz = np.array(
-            [p.pos for p in compound.particles() if p.element.symbol == "H"]
-        )
+        xyz = np.array([p.pos for p in compound.particles() if p.element.symbol == "H"])
         distances = np.linalg.norm(xyz[:, None, :] - xyz[None, :, :], axis=-1)
         np.fill_diagonal(distances, np.inf)
         return distances.min()
@@ -861,9 +859,7 @@ class TestFragmentTwist(BaseTest):
         # Coplanar neighbor directions already pin the twist consistently
         n = 12
         index = np.arange(n)
-        coords = np.stack(
-            [index * 0.22, 0.1 * (-1.0) ** index, np.zeros(n)], axis=1
-        )
+        coords = np.stack([index * 0.22, 0.1 * (-1.0) ** index, np.zeros(n)], axis=1)
         path = Path(coordinates=coords, bead_name="A")
         path.form_linear_bond_graph()
         without = path.backmap(self.FRAG, seed=1, templates=template, n_twists=0)

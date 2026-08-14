@@ -45,13 +45,14 @@ class Chemistry:
         A foyer compatible forcefield name or XML path. None uses UFF.
     bead_name : str, optional
         Which fragment to tune. Required when more than one is defined.
-    center : str, default "geometry"
-        Where a bead sits within its fragment, either "geometry" for the
-        arithmetic mean of the member positions or "mass" for the mass
-        weighted mean. Every tuned parameter is defined against this choice,
-        so it has to match whatever the resulting path is compared to. The
-        two diverge as the mapping gets finer, since a bead holding few
-        heavy atoms is pulled further off its center of mass by hydrogens.
+    center : str, default "mass"
+        Where a bead sits within its fragment, either "mass" for the mass
+        weighted mean of the member positions or "geometry" for the
+        arithmetic mean. Every tuned parameter is defined against this
+        choice, so it has to match whatever the resulting path is compared
+        to. Mass weighting keeps a bead near its heavy atoms, which makes
+        the coarse grained bond length about three times less sensitive to
+        temperature than a geometric centroid pulled around by hydrogens.
     """
 
     def __init__(
@@ -60,12 +61,14 @@ class Chemistry:
         templates=None,
         forcefield=None,
         bead_name=None,
-        center="geometry",
+        center="mass",
     ):
         if cgsmiles is None and not templates:
             raise ValueError("Pass a cgsmiles fragment string, templates, or both.")
         if center not in ("geometry", "mass"):
-            raise ValueError(f"Argument {center=} is invalid. Pass 'geometry' or 'mass'.")
+            raise ValueError(
+                f"Argument {center=} is invalid. Pass 'geometry' or 'mass'."
+            )
         self.cgsmiles = cgsmiles
         self.templates = templates
         self.forcefield = forcefield
@@ -88,9 +91,7 @@ class Chemistry:
 
     def coarse_grain(self, compound):
         """Coarse grain a backmapped compound back to a Path."""
-        cg_path, _ = coarse_grain(
-            compound, beads=[self.bead_name], center=self.center
-        )
+        cg_path, _ = coarse_grain(compound, beads=[self.bead_name], center=self.center)
         return cg_path
 
     def pair_fragment(self):
@@ -196,9 +197,7 @@ class TunerResult:
             minimum is 0. Unsampled bins are np.inf.
         """
         temperature = self.temperature if temperature is None else temperature
-        return self.theta_grid, marginal_free_energy(
-            self.energies, temperature, axis=1
-        )
+        return self.theta_grid, marginal_free_energy(self.energies, temperature, axis=1)
 
     def dihedral_energy(self, temperature=None):
         """Free energy against dihedral, bending angle integrated out.
@@ -210,9 +209,7 @@ class TunerResult:
             minimum is 0. Unsampled bins are np.inf.
         """
         temperature = self.temperature if temperature is None else temperature
-        return self.phi_grid, marginal_free_energy(
-            self.energies, temperature, axis=0
-        )
+        return self.phi_grid, marginal_free_energy(self.energies, temperature, axis=0)
 
     def plot_pair(self, temperature=None, ax=None, **kwargs):
         """Plot the orientation averaged pair energy against separation."""
@@ -301,8 +298,8 @@ class Tuner:
         A foyer compatible forcefield name or XML path. None uses UFF.
     bead_name : str, optional
         Which fragment to tune. Required when more than one is defined.
-    center : str, default "geometry"
-        Where a bead sits within its fragment, "geometry" or "mass". See
+    center : str, default "mass"
+        Where a bead sits within its fragment, "mass" or "geometry". See
         ``Chemistry``.
     temperature : float, default 300.0
         Temperature in Kelvin used to weight the energy tables.
@@ -335,7 +332,7 @@ class Tuner:
         templates=None,
         forcefield=None,
         bead_name=None,
-        center="geometry",
+        center="mass",
         temperature=300.0,
         n_beads=4,
         n_walks=500,

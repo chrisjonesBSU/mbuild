@@ -166,9 +166,7 @@ def _underdetermined_axis(sources, targets, tol=1e-6):
     return right_vectors[0]
 
 
-def _resolve_twist(
-    local_xyz, axis, group_anchor, positions, n_twists=24, cutoff=0.6
-):
+def _resolve_twist(local_xyz, axis, group_anchor, positions, n_twists=24, cutoff=0.6):
     """Rotate a fragment about an axis to its least overlapping orientation.
 
     Scans ``n_twists`` evenly spaced rotations about ``axis`` and keeps the

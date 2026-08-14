@@ -10,7 +10,7 @@ from mbuild.path.points import GAS_CONSTANT, boltzmann_weights
 from mbuild.simulation import OpenMMSimulation
 
 from .energy import PairEnergy, restrained_energy
-from .geometry import bond_lengths, internals, interior_angle_dihedral_pair
+from .geometry import bond_lengths, interior_angle_dihedral_pair, internals
 
 logger = logging.getLogger(__name__)
 
@@ -75,13 +75,16 @@ def relaxed_bond_length(
     sim.minimize(n_steps=n_steps, tolerance=tolerance)
     coordinates = chemistry.coarse_grain(sim.compound).coordinates
     _, angles, _ = internals(coordinates)
-    return float(np.mean(bond_lengths(coordinates))), float(
-        np.degrees(np.mean(angles))
-    )
+    return float(np.mean(bond_lengths(coordinates))), float(np.degrees(np.mean(angles)))
 
 
 def natural_bond_length(
-    chemistry, n_beads=12, spacing=0.25, seed_angles_deg=(130.0, 115.0), rtol=0.02, **kwargs
+    chemistry,
+    n_beads=12,
+    spacing=0.25,
+    seed_angles_deg=(130.0, 115.0),
+    rtol=0.02,
+    **kwargs,
 ):
     """Mean coarse grained bond length the chemistry settles at.
 
@@ -296,6 +299,204 @@ def sample_walks(
         pairs.append(interior_angle_dihedral_pair(angles, dihedrals))
         energies.append(energy)
     return pairs, np.asarray(energies)
+
+
+def sample_thermal(
+    chemistry,
+    bond_length,
+    radius,
+    n_beads=12,
+    n_starts=1,
+    equilibrate_ps=100.0,
+    production_ps=200.0,
+    n_frames=40,
+    temperature=300.0,
+    friction=0.5,
+    dt=0.0005,
+    seed=0,
+):
+    """Coarse grained internals from unconstrained MD seeded by random walks.
+
+    Each start is an independent walk, backmapped and run without restraints.
+    Frames are coarse grained and their internal coordinates returned, so the
+    distribution is histogrammed directly with no restrained minimum, no
+    reweighting and no energy attribution.
+
+    Dynamics are stepped continuously rather than through repeated ``nvt``
+    calls, which redraw velocities and need calls of a few times
+    ``1 / friction`` to hold temperature.
+
+    Parameters
+    ----------
+    chemistry : Chemistry, required
+        Fragment definition and forcefield.
+    bond_length, radius : float, required
+        Walk parameters used to build the starting conformations. The
+        relaxation is unrestrained, so these seed the run rather than
+        constrain the result.
+    n_beads : int, default 12
+        Sites per chain. Longer chains give more internal coordinates per
+        frame and dilute the influence of the ends.
+    n_starts : int, default 1
+        Independent walks, each its own trajectory. A single trajectory
+        cannot detect its own trapping, so more than one turns replica
+        spread into a convergence diagnostic.
+    equilibrate_ps : float, default 100.0
+        Discarded before frames are kept, so each replica forgets its
+        starting conformation. Raise it when replicas disagree.
+    production_ps : float, default 200.0
+        Sampled per replica.
+    n_frames : int, default 40
+        Frames kept per replica.
+    temperature : float, default 300.0
+        Temperature in Kelvin.
+    friction : float, default 0.5
+        Langevin friction in 1/ps. Below the OpenMM default, which sits on
+        the high friction side of the Kramers turnover, so barriers are
+        crossed about four times faster here.
+    dt : float, default 0.0005
+        Timestep in picoseconds.
+    seed : int, default 0
+        Base seed. Replica i uses seed + i.
+
+    Returns
+    -------
+    replicas : list of list of np.ndarray
+        Coarse grained coordinates, grouped by replica so spread across them
+        can be measured.
+    """
+    import openmm.unit as u
+    from openmm.openmm import LangevinIntegrator
+
+    replicas = []
+    for index in range(n_starts):
+        walk_seed = seed + index
+        try:
+            path = hard_sphere_random_walk(
+                bead_name=chemistry.bead_name,
+                bond_length=bond_length,
+                radius=radius,
+                termination=n_beads,
+                seed=walk_seed,
+            )
+        except PathConvergenceError:
+            logger.warning(f"Walk {walk_seed} did not converge, skipping this start.")
+            continue
+        compound = chemistry.backmap(path)
+        sim = OpenMMSimulation(
+            compound, forcefield=chemistry.forcefield, platform="CPU", seed=walk_seed
+        )
+        sim.minimize(n_steps=4000, tolerance=1.0)
+        integrator = LangevinIntegrator(
+            temperature * u.kelvin, friction / u.picosecond, dt * u.picoseconds
+        )
+        integrator.setRandomNumberSeed(walk_seed)
+        sim._create_simulation(integrator)
+        sim.simulation.context.setVelocitiesToTemperature(temperature, walk_seed)
+        sim.simulation.step(int(equilibrate_ps / dt))
+        frames, per_frame = [], max(1, int(production_ps / dt / n_frames))
+        for _ in range(n_frames):
+            sim.simulation.step(per_frame)
+            sim._update_compound_positions()
+            frames.append(chemistry.coarse_grain(sim.compound).coordinates.copy())
+        replicas.append(frames)
+        logger.info(
+            f"replica {index} done, {len(frames)} frames over {production_ps:g} ps"
+        )
+    if not replicas:
+        raise RuntimeError("No starting conformation produced a usable trajectory.")
+    return replicas
+
+
+def thermal_internals(replicas):
+    """Bond lengths, bending angles and dihedrals pooled over replicas.
+
+    Every internal coordinate of every frame counts, so a longer chain
+    yields more samples per frame.
+
+    Returns
+    -------
+    bonds, angles, dihedrals : np.ndarray
+        Angles and dihedrals in radians, dihedrals signed over [-pi, pi].
+    """
+    frames = [frame for replica in replicas for frame in replica]
+    measured = [internals(frame) for frame in frames]
+    return tuple(np.concatenate([m[i] for m in measured]) for i in range(3))
+
+
+def replica_spread(replicas):
+    """Peak to peak variation of per replica means, as a convergence check.
+
+    A single trajectory cannot detect its own trapping. Spread comparable to
+    the statistical scatter of one replica means the replicas agree.
+
+    Returns
+    -------
+    dict
+        Spread in ``bond`` (nm), ``angle`` (degrees) and ``trans``, the
+        fraction of dihedrals beyond 160 degrees. Zeros for one replica,
+        which carries no information about its own convergence.
+    """
+    if len(replicas) < 2:
+        return {"bond": 0.0, "angle": 0.0, "trans": 0.0}
+    rows = []
+    for replica in replicas:
+        bonds, angles, dihedrals = thermal_internals([replica])
+        rows.append(
+            [
+                bonds.mean(),
+                np.degrees(angles).mean(),
+                float(np.mean(np.abs(np.degrees(dihedrals)) > 160.0)),
+            ]
+        )
+    spread = np.ptp(np.array(rows), axis=0)
+    return {"bond": spread[0], "angle": spread[1], "trans": spread[2]}
+
+
+def energy_table_from_samples(angles, dihedrals, thetas, phis, temperature):
+    """Boltzmann invert a sampled (theta, phi) histogram into an energy table.
+
+    The histogram of a thermal ensemble is a probability density, and
+    ``random_coordinate`` places a site at polar angle theta, so the table
+    the sampler consumes has to be the constrained potential rather than the
+    density. Dividing out the angular measure before inverting does that,
+    matching the convention ``angle_table_from_sampler`` assumes in the other
+    direction. Skipping it biases the walk toward extended chains.
+
+    Each bending angle bin is divided by its exact measure,
+    ``cos(low) - cos(high)``, rather than by ``sin`` at the bin center. The
+    two agree to well under a percent for the bin widths used here, so this
+    is exactness rather than a correction.
+
+    Parameters
+    ----------
+    angles, dihedrals : np.ndarray, required
+        Sampled values in radians, of any length and not necessarily paired.
+        Pairs are formed by flanking, as in ``angle_dihedral_pairs``.
+    thetas, phis : np.ndarray, required
+        Bin centers in radians.
+    temperature : float, required
+        Temperature in Kelvin.
+
+    Returns
+    -------
+    np.ndarray (len(thetas), len(phis))
+        Energy of each cell in kJ/mol, offset so the minimum is 0. Cells with
+        no samples are np.inf.
+    """
+    theta_edges = _edges(thetas)
+    counts, _, _ = np.histogram2d(angles, dihedrals, bins=[theta_edges, _edges(phis)])
+    # Exact angular measure of each bending angle bin
+    measure = np.cos(theta_edges[:-1]) - np.cos(theta_edges[1:])
+    density = counts / np.clip(measure, 1e-12, None)[:, None]
+    table = np.full(density.shape, np.inf)
+    sampled = density > 0
+    if not sampled.any():
+        raise ValueError("No samples fell inside the grid.")
+    rt = GAS_CONSTANT * temperature
+    table[sampled] = -rt * np.log(density[sampled])
+    table[sampled] -= table[sampled].min()
+    return table
 
 
 class FreeEnergyAccumulator:

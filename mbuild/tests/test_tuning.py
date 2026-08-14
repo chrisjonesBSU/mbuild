@@ -11,11 +11,14 @@ from mbuild.path.tuning import (
     barker_henderson,
     bond_lengths,
     effective_sample_size,
+    energy_table_from_samples,
     free_energy_table,
-    internals,
     interior_angle_dihedral_pair,
+    internals,
     marginal_free_energy,
     phi_grid,
+    replica_spread,
+    thermal_internals,
     theta_grid,
 )
 from mbuild.path.tuning.tuner import _fragment_names, _fragment_smiles
@@ -83,9 +86,10 @@ class TestGeometry(BaseTest):
         assert pair[0, 1] == pytest.approx(10.0)
 
     def test_interior_pair_too_short(self):
-        assert interior_angle_dihedral_pair(
-            np.array([1.0]), np.array([])
-        ).shape == (0, 2)
+        assert interior_angle_dihedral_pair(np.array([1.0]), np.array([])).shape == (
+            0,
+            2,
+        )
 
     def test_interior_pair_tracks_a_real_chain(self):
         # Measured off real coordinates rather than synthetic index arrays
@@ -151,9 +155,7 @@ class TestFreeEnergy(BaseTest):
         # Second round carries the lower energy, forcing a shift rescale
         pooled.add(self._pairs(values[1:]), energies[1:])
         pooled.add(self._pairs(values[:1]), energies[:1])
-        one_shot = free_energy_table(
-            self._pairs(values), energies, thetas, phis, 300.0
-        )
+        one_shot = free_energy_table(self._pairs(values), energies, thetas, phis, 300.0)
         assert np.allclose(pooled.table(), one_shot, equal_nan=True)
 
     def test_table_is_relative_not_absolute(self):
@@ -170,7 +172,9 @@ class TestFreeEnergy(BaseTest):
         assert np.allclose(shifted[finite] - base[finite], 10.0)
 
     def test_empty_accumulator_raises(self):
-        accumulator = FreeEnergyAccumulator(theta_grid(0.285, 0.392, 4), phi_grid(4), 300.0)
+        accumulator = FreeEnergyAccumulator(
+            theta_grid(0.285, 0.392, 4), phi_grid(4), 300.0
+        )
         with pytest.raises(ValueError):
             accumulator.table()
 
@@ -256,8 +260,8 @@ class TestFragmentParsing(BaseTest):
 class TestChemistryCenter(BaseTest):
     CGSMILES = "{#A=[>]CC[<]}"
 
-    def test_defaults_to_geometry(self):
-        assert Chemistry(self.CGSMILES).center == "geometry"
+    def test_defaults_to_mass(self):
+        assert Chemistry(self.CGSMILES).center == "mass"
 
     @pytest.mark.parametrize("center", ["geometry", "mass"])
     def test_center_is_kept(self, center):
@@ -268,8 +272,8 @@ class TestChemistryCenter(BaseTest):
             Chemistry(self.CGSMILES, center="centroid")
 
     def test_tuner_passes_center_through(self):
-        tuner = Tuner(self.CGSMILES, center="mass")
-        assert tuner.chemistry.center == "mass"
+        tuner = Tuner(self.CGSMILES, center="geometry")
+        assert tuner.chemistry.center == "geometry"
 
     def test_center_reaches_coarse_grain(self):
         from mbuild.path import Path
@@ -283,9 +287,9 @@ class TestChemistryCenter(BaseTest):
         )
         path.form_linear_bond_graph()
         compound = chemistry.backmap(path)
-        geometric = chemistry.coarse_grain(compound).coordinates
-        chemistry.center = "mass"
         weighted = chemistry.coarse_grain(compound).coordinates
+        chemistry.center = "geometry"
+        geometric = chemistry.coarse_grain(compound).coordinates
         assert geometric.shape == weighted.shape
         assert not np.allclose(geometric, weighted, atol=1e-6)
 
@@ -346,12 +350,14 @@ class TestPlotting(BaseTest):
     def _result(self):
         thetas, phis = theta_grid(0.285, 0.392, 6), phi_grid(6)
         # A table with real structure, so the curves are not degenerate
-        energies = 20.0 * (1.0 - np.cos(phis)[None, :]) + (
-            50.0 * (thetas - 2.0) ** 2
-        )[:, None]
+        energies = (
+            20.0 * (1.0 - np.cos(phis)[None, :]) + (50.0 * (thetas - 2.0) ** 2)[:, None]
+        )
         energies[0, 0] = np.inf
         separations = np.linspace(0.2, 0.9, 60)
-        u_pair = (10.0 * ((0.4 / separations) ** 12 - (0.4 / separations) ** 6))[None, :]
+        u_pair = (10.0 * ((0.4 / separations) ** 12 - (0.4 / separations) ** 6))[
+            None, :
+        ]
         return TunerResult(
             bond_length=0.285,
             radius=0.392,
@@ -396,3 +402,94 @@ class TestPlotting(BaseTest):
         y = ax.lines[0].get_ydata()
         assert np.isnan(y[1:]).all()
         assert np.isfinite(y[0])
+
+
+class TestThermalSampling(BaseTest):
+    """Histogramming a thermal ensemble instead of scoring restrained minima."""
+
+    def _replica(self, angle_deg, dihedral_deg, n_frames=5, jitter=0.0, seed=0):
+        """Frames of a chain held at one angle and dihedral, optionally jittered."""
+        rng = np.random.default_rng(seed)
+        frames = []
+        for _ in range(n_frames):
+            theta = np.radians(angle_deg + jitter * rng.normal())
+            phi = np.radians(dihedral_deg + jitter * rng.normal())
+            frames.append(four_bead(0.26, theta, phi))
+        return frames
+
+    def test_internals_pool_across_replicas(self):
+        replicas = [self._replica(120.0, 180.0), self._replica(110.0, 60.0)]
+        bonds, angles, dihedrals = thermal_internals(replicas)
+        # 4 sites give 3 bonds, 2 angles and 1 dihedral per frame, 10 frames
+        assert bonds.shape == (30,)
+        assert angles.shape == (20,)
+        assert dihedrals.shape == (10,)
+
+    def test_one_replica_reports_no_spread(self):
+        spread = replica_spread([self._replica(120.0, 180.0)])
+        assert spread == {"bond": 0.0, "angle": 0.0, "trans": 0.0}
+
+    def test_agreeing_replicas_have_small_spread(self):
+        replicas = [self._replica(120.0, 180.0, jitter=0.5, seed=s) for s in range(3)]
+        spread = replica_spread(replicas)
+        assert spread["angle"] < 2.0
+        assert spread["trans"] == pytest.approx(0.0)
+
+    def test_disagreeing_replicas_are_caught(self):
+        replicas = [self._replica(120.0, 180.0), self._replica(100.0, 60.0)]
+        spread = replica_spread(replicas)
+        assert spread["angle"] > 10.0
+        assert spread["trans"] > 0.5
+
+    def test_isotropic_samples_invert_to_a_flat_table(self):
+        # Directions uniform on the sphere give p(theta) proportional to
+        # sin(theta), so dividing it out must leave no angle dependence
+        from mbuild.path.tuning.stages import _edges
+
+        rng = np.random.default_rng(0)
+        thetas = theta_grid(0.26, 0.30, 8)
+        phis = phi_grid(8)
+        # Cover the outer bin edges, not just the range of bin centers, or
+        # the end bins come out short and look like a Jacobian error
+        edges = _edges(thetas)
+        draws = np.arccos(rng.uniform(np.cos(edges[-1]), np.cos(edges[0]), 400_000))
+        table = energy_table_from_samples(
+            draws, rng.uniform(-np.pi, np.pi, draws.size), thetas, phis, 300.0
+        )
+        finite = table[np.isfinite(table)]
+        assert np.ptp(finite) < 0.3
+
+    def test_unsampled_cells_are_infinite(self):
+        thetas, phis = theta_grid(0.26, 0.30, 6), phi_grid(6)
+        table = energy_table_from_samples(
+            np.full(500, thetas[2]), np.full(500, phis[3]), thetas, phis, 300.0
+        )
+        assert np.isfinite(table[2, 3])
+        assert np.isinf(table).sum() == table.size - 1
+
+    def test_no_samples_in_range_raises(self):
+        thetas, phis = theta_grid(0.26, 0.30, 6), phi_grid(6)
+        with pytest.raises(ValueError):
+            energy_table_from_samples(
+                np.full(10, 0.01), np.full(10, 0.0), thetas, phis, 300.0
+            )
+
+    def test_table_drives_a_walk(self):
+        from mbuild.path import hard_sphere_random_walk
+
+        rng = np.random.default_rng(1)
+        thetas, phis = theta_grid(0.26, 0.30, 8), phi_grid(8)
+        draws = np.radians(rng.normal(140.0, 8.0, 50_000))
+        table = energy_table_from_samples(
+            draws, rng.uniform(-np.pi, np.pi, draws.size), thetas, phis, 300.0
+        )
+        sampler = AngleDihedralSampler(thetas, phis, table, temperature=300.0)
+        path = hard_sphere_random_walk(
+            bead_name="A",
+            bond_length=0.26,
+            radius=0.30,
+            rw_angles=sampler,
+            termination=60,
+            seed=4,
+        )
+        assert len(path.coordinates) == 60

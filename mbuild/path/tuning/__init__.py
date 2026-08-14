@@ -16,8 +16,8 @@ from .energy import PairEnergy, add_centroid_restraints, restrained_energy
 from .geometry import (
     angle_dihedral_pairs,
     bond_lengths,
-    internals,
     interior_angle_dihedral_pair,
+    internals,
 )
 from .plotting import (
     plot_angle_energy,
@@ -28,6 +28,7 @@ from .stages import (
     FreeEnergyAccumulator,
     barker_henderson,
     effective_sample_size,
+    energy_table_from_samples,
     free_energy_table,
     marginal_free_energy,
     natural_bond_length,
@@ -35,7 +36,10 @@ from .stages import (
     pair_potential,
     phi_grid,
     relaxed_bond_length,
+    replica_spread,
+    sample_thermal,
     sample_walks,
+    thermal_internals,
     theta_grid,
 )
 from .tuner import Chemistry, Tuner, TunerResult, tune
@@ -51,6 +55,7 @@ __all__ = [
     "barker_henderson",
     "bond_lengths",
     "effective_sample_size",
+    "energy_table_from_samples",
     "free_energy_table",
     "internals",
     "interior_angle_dihedral_pair",
@@ -63,8 +68,11 @@ __all__ = [
     "plot_dihedral_energy",
     "plot_pair_energy",
     "relaxed_bond_length",
+    "replica_spread",
     "restrained_energy",
+    "sample_thermal",
     "sample_walks",
     "theta_grid",
+    "thermal_internals",
     "tune",
 ]

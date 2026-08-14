@@ -61,9 +61,7 @@ def plot_pair_energy(
     return ax
 
 
-def plot_angle_energy(
-    theta_grid, table, temperature, ax=None, degrees=True, **kwargs
-):
+def plot_angle_energy(theta_grid, table, temperature, ax=None, degrees=True, **kwargs):
     """Plot the free energy against bending angle, dihedral integrated out.
 
     Parameters
@@ -97,9 +95,7 @@ def plot_angle_energy(
     )
 
 
-def plot_dihedral_energy(
-    phi_grid, table, temperature, ax=None, degrees=True, **kwargs
-):
+def plot_dihedral_energy(phi_grid, table, temperature, ax=None, degrees=True, **kwargs):
     """Plot the free energy against dihedral, bending angle integrated out.
 
     Parameters

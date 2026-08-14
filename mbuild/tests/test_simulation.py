@@ -1020,4 +1020,3 @@ class TestOpenMMVelocities(BaseTest):
             )
         )
         assert self._kinetic_temperature(sim) == pytest.approx(0.0, abs=1e-9)
-
