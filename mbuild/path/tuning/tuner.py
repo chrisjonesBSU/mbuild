@@ -307,8 +307,11 @@ class Tuner:
     temperature : float, default 300.0
         Temperature in Kelvin used to weight the energy tables.
     n_beads : int, default 4
-        Sites per sampling walk. A 4mer has two angles and one dihedral, so
-        attribution of a whole chain energy is direct.
+        Sites per sampling walk. Energy is attributed to the interior
+        coordinate set only. Longer walks add sites that are not measured but
+        still contribute to the energy, which collapses the effective sample
+        size, so raise this only once the energy can be restricted to the
+        measured beads. See ``sample_walks``.
     n_walks : int, default 500
         Walks attempted per refinement round.
     n_rounds : int, default 3

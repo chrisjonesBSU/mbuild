@@ -10,7 +10,7 @@ from mbuild.path.points import GAS_CONSTANT, boltzmann_weights
 from mbuild.simulation import OpenMMSimulation
 
 from .energy import PairEnergy, restrained_energy
-from .geometry import angle_dihedral_pairs, bond_lengths, internals
+from .geometry import bond_lengths, internals, interior_angle_dihedral_pair
 
 logger = logging.getLogger(__name__)
 
@@ -235,6 +235,8 @@ def sample_walks(
     reference distribution is exactly the sampler passed in and only
     geometries the walk can reach are sampled.
 
+    Each energy is attributed to the walk's interior coordinate set alone.
+
     Parameters
     ----------
     chemistry : Chemistry, required
@@ -244,7 +246,13 @@ def sample_walks(
     n_walks : int, default 500
         Number of walks attempted.
     n_beads : int, default 4
-        Sites per walk.
+        Sites per walk. Longer walks put chain rather than terminal caps on
+        the measured beads, which is worth about 6 degrees of bending angle
+        for polyethylene under UFF. Realizing that needs an energy restricted
+        to the measured beads, because a whole chain energy also carries the
+        sites that are not measured, and the walk places those anywhere. Each
+        added site therefore widens the energy spread and collapses the
+        effective sample size.
     rw_angles : sampler, optional
         Passed straight to the walk as its angle sampler.
     seed : int, default 0
@@ -285,7 +293,7 @@ def sample_walks(
         )
         if not np.isfinite(energy) or energy > ENERGY_CUTOFF:
             continue
-        pairs.append(angle_dihedral_pairs(angles, dihedrals))
+        pairs.append(interior_angle_dihedral_pair(angles, dihedrals))
         energies.append(energy)
     return pairs, np.asarray(energies)
 

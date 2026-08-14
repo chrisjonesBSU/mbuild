@@ -13,6 +13,7 @@ from mbuild.path.tuning import (
     effective_sample_size,
     free_energy_table,
     internals,
+    interior_angle_dihedral_pair,
     marginal_free_energy,
     phi_grid,
     theta_grid,
@@ -65,6 +66,34 @@ class TestGeometry(BaseTest):
 
     def test_angle_dihedral_pairs_too_short(self):
         assert angle_dihedral_pairs(np.array([1.0]), np.array([])).shape == (0, 2)
+
+    def test_interior_pair_of_a_6mer_is_the_middle(self):
+        # 6 sites give 4 angles and 3 dihedrals; the middle dihedral is
+        # index 1, flanked by angles 1 and 2
+        angles = np.array([1.0, 2.0, 4.0, 8.0])
+        dihedrals = np.array([10.0, 20.0, 30.0])
+        pair = interior_angle_dihedral_pair(angles, dihedrals)
+        assert pair.shape == (1, 2)
+        assert pair[0, 0] == pytest.approx(3.0)
+        assert pair[0, 1] == pytest.approx(20.0)
+
+    def test_interior_pair_of_a_4mer_uses_the_only_dihedral(self):
+        pair = interior_angle_dihedral_pair(np.array([1.0, 3.0]), np.array([10.0]))
+        assert pair[0, 0] == pytest.approx(2.0)
+        assert pair[0, 1] == pytest.approx(10.0)
+
+    def test_interior_pair_too_short(self):
+        assert interior_angle_dihedral_pair(
+            np.array([1.0]), np.array([])
+        ).shape == (0, 2)
+
+    def test_interior_pair_tracks_a_real_chain(self):
+        # Measured off real coordinates rather than synthetic index arrays
+        coords = four_bead(0.285, np.radians(110), np.radians(60))
+        _, angles, dihedrals = internals(coords)
+        pair = interior_angle_dihedral_pair(angles, dihedrals)
+        assert np.degrees(pair[0, 0]) == pytest.approx(110.0, abs=1e-3)
+        assert np.degrees(pair[0, 1]) == pytest.approx(60.0, abs=1e-3)
 
 
 class TestGrids(BaseTest):

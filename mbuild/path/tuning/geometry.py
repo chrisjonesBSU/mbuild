@@ -35,11 +35,45 @@ def internals(coordinates):
     return bonds, angles, dihedrals
 
 
+def interior_angle_dihedral_pair(angles, dihedrals):
+    """Return the (theta, phi) pair at the center of a chain.
+
+    Pairs the middle dihedral with the mean of the two bending angles
+    flanking it, leaving any outer sites as context.
+
+    At 6 sites or more this keeps terminal caps off the measured beads,
+    worth about 6 degrees of bending angle for polyethylene under UFF.
+    Realizing that gain needs an energy restricted to the measured beads,
+    since a whole chain energy is dominated by the coordinates this
+    discards. At 4 sites the measured beads still carry caps and only the
+    attribution differs.
+
+    Parameters
+    ----------
+    angles : np.ndarray (N-2,), required
+        Bending angles in path order.
+    dihedrals : np.ndarray (N-3,), required
+        Signed dihedrals in path order.
+
+    Returns
+    -------
+    np.ndarray (1, 2)
+        Columns are (theta, phi) in radians. Empty for chains under 4 sites.
+    """
+    if len(dihedrals) == 0:
+        return np.empty((0, 2))
+    middle = (len(dihedrals) - 1) // 2
+    theta = 0.5 * (angles[middle] + angles[middle + 1])
+    return np.array([[theta, dihedrals[middle]]])
+
+
 def angle_dihedral_pairs(angles, dihedrals):
     """Pair each dihedral with the two bending angles that flank it.
 
-    A whole chain energy covers every internal coordinate at once, so each
-    energy is attributed to all of the pairs a chain contains.
+    Attributes one energy to every coordinate set a chain contains. Spreads
+    a single energy over coordinates of differing quality, which biases the
+    bending angle about 2 degrees wide of
+    ``interior_angle_dihedral_pair``.
 
     Parameters
     ----------

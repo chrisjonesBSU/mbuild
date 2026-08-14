@@ -13,7 +13,12 @@ inherit chemistry specific local structure instead of hard sphere defaults.
 
 # ruff: noqa: F401
 from .energy import PairEnergy, add_centroid_restraints, restrained_energy
-from .geometry import angle_dihedral_pairs, bond_lengths, internals
+from .geometry import (
+    angle_dihedral_pairs,
+    bond_lengths,
+    internals,
+    interior_angle_dihedral_pair,
+)
 from .plotting import (
     plot_angle_energy,
     plot_dihedral_energy,
@@ -48,6 +53,7 @@ __all__ = [
     "effective_sample_size",
     "free_energy_table",
     "internals",
+    "interior_angle_dihedral_pair",
     "marginal_free_energy",
     "natural_bond_length",
     "orientation_averaged_pmf",
