@@ -697,7 +697,9 @@ class OpenMMSimulation:
         cutoff, regardless of forcefield. Forces set to NoCutoff (for example
         non-periodic compounds) are unaffected.
     seed : int, default 1
-        Seed for the coordinate kick, so kicks are reproducible.
+        Random seed for the coordinate kick, for velocities drawn at the
+        start of a dynamics run, and for the Langevin integrator, so a run
+        is reproducible.
     kick : bool, default True
         Nudge coordinates before simulating. This can be critical to remove
         flat dihedrals.
@@ -728,6 +730,7 @@ class OpenMMSimulation:
         self.r_cut = r_cut
         self.energies = []
         self.box = box
+        self.seed = seed
 
         # Explicit box overrides compound.box (parity with HoomdSimulation).
         if self.box is not None:
@@ -813,6 +816,15 @@ class OpenMMSimulation:
             Friction coefficient in 1/ps.
         report_interval : int or None
             If given, record energies every this many steps.
+
+        Notes
+        -----
+        Velocities are drawn fresh from a Maxwell-Boltzmann distribution at
+        ``T`` on every call, so a run split into several calls samples
+        positions continuously while its momenta restart each time. A new
+        Context starts at rest, so without this a call needs roughly
+        ``1 / friction`` to reach ``T`` and short repeated calls hold the
+        system well below the requested temperature.
         """
         import openmm.unit as u
         from openmm.openmm import LangevinIntegrator
@@ -820,7 +832,9 @@ class OpenMMSimulation:
         integrator = LangevinIntegrator(
             T * u.kelvin, friction / u.picosecond, dt * u.picoseconds
         )
+        integrator.setRandomNumberSeed(self.seed)
         self._create_simulation(integrator)
+        self.simulation.context.setVelocitiesToTemperature(T, self.seed)
 
         if report_interval:
             for i in range(0, n_steps, report_interval):

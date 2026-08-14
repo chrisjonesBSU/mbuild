@@ -953,3 +953,71 @@ class TestOpenMMSimulation(BaseTest):
         assert not np.allclose(coords_after_min, simple_compound.xyz, atol=1e-6)
         energy = sim.get_energy()
         assert len(energy["potential_energy"]) == 2
+
+
+class TestOpenMMVelocities(BaseTest):
+    """Velocity initialization for OpenMM runs."""
+
+    @staticmethod
+    def _kinetic_temperature(sim):
+        import openmm.unit as u
+
+        state = sim.simulation.context.getState(getEnergy=True)
+        energy = state.getKineticEnergy() / u.kilojoule_per_mole
+        dof = 3 * sim.compound.n_particles
+        return 2.0 * energy / (dof * 0.008314462618)
+
+    @pytest.fixture
+    def decane(self):
+        return mb.load("CCCCCCCCCC", smiles=True)
+
+    def test_short_repeated_calls_reach_the_target(self, decane):
+        # A fresh Context starts at rest, so without velocity initialization
+        # short calls end well below the thermostat's temperature
+        sim = OpenMMSimulation(decane, forcefield=None, platform="CPU", seed=1)
+        sim.minimize(n_steps=1000)
+        temperatures = []
+        for _ in range(6):
+            sim.nvt(n_steps=200, T=300, dt=0.0005)
+            temperatures.append(self._kinetic_temperature(sim))
+        assert np.mean(temperatures[1:]) > 200
+
+    def test_target_temperature_is_followed(self, decane):
+        means = []
+        for target in (100, 600):
+            sim = OpenMMSimulation(decane, forcefield=None, platform="CPU", seed=1)
+            sim.minimize(n_steps=1000)
+            temperatures = []
+            for _ in range(6):
+                sim.nvt(n_steps=200, T=target, dt=0.0005)
+                temperatures.append(self._kinetic_temperature(sim))
+            means.append(np.mean(temperatures[1:]))
+        assert means[0] < means[1]
+
+    def test_run_is_reproducible_under_a_seed(self, decane):
+        # Both the velocity draw and the integrator take the seed, so a
+        # repeated run retraces the same trajectory
+        def positions(seed):
+            sim = OpenMMSimulation(
+                mb.clone(decane), forcefield=None, platform="CPU", seed=seed
+            )
+            sim.nvt(n_steps=500, T=300, dt=0.0005)
+            return sim.compound.xyz.copy()
+
+        assert np.allclose(positions(1), positions(1))
+        assert not np.allclose(positions(1), positions(2))
+
+    def test_context_has_no_velocities_of_its_own(self, decane):
+        import openmm.unit as u
+        from openmm.openmm import LangevinIntegrator
+
+        # Temperature belongs to the run, not to the simulation, so a
+        # Context built directly is at rest
+        sim = OpenMMSimulation(decane, forcefield=None, platform="CPU", seed=1)
+        sim._create_simulation(
+            LangevinIntegrator(
+                300 * u.kelvin, 1.0 / u.picosecond, 0.0005 * u.picoseconds
+            )
+        )
+        assert self._kinetic_temperature(sim) == pytest.approx(0.0, abs=1e-9)
+
