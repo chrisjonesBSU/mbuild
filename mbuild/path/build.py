@@ -1367,12 +1367,18 @@ def _coerce_sampler(sampler, rng, name):
         f"{sampler} is not a supported form to sample {name}. "
         "See mbuild.path.points.AnglesSampler."
     )
-=======
+
+
 def _angle_range(angles_sampler):
     """Return the smallest and largest angle a sampler can produce.
 
     Returns None for distributions with unbounded support.
     """
+    if isinstance(angles_sampler, AngleDihedralSampler):
+        return (
+            float(angles_sampler.theta_grid.min()),
+            float(angles_sampler.theta_grid.max()),
+        )
     if angles_sampler.distribution == "uniform":
         return (
             float(angles_sampler.kwargs["low"]),
@@ -1418,7 +1424,10 @@ def _check_angle_range(bond_length, radius, angles_sampler):
             "Reduce radius, increase bond_length, or raise rw_angles."
         )
     if critical_angle > low:
-        if angles_sampler.distribution == "uniform":
+        if isinstance(angles_sampler, AngleDihedralSampler):
+            below = angles_sampler.theta_grid < critical_angle
+            fraction = float(angles_sampler.weights[below].sum())
+        elif angles_sampler.distribution == "uniform":
             fraction = (critical_angle - low) / (high - low)
         else:
             angles = np.asarray(angles_sampler.kwargs["a"], dtype=float)
@@ -1430,7 +1439,6 @@ def _check_angle_range(bond_length, radius, angles_sampler):
             f"starting at {np.degrees(low):.1f} degrees, biasing the walk "
             "toward wider angles."
         )
->>>>>>> origin/rw-excl-bonded
 
 
 def _normalize_initial_point(initial_point):
@@ -1581,7 +1589,11 @@ class RandomWalkState:
         self.bias = bias
         self.trial_batch_size = trial_batch_size
         self.chunk_size = chunk_size
-        _check_angle_range(bond_length, radius, self.angles)
+        _check_angle_range(
+            bond_length,
+            radius,
+            self.joint_angles if self.angles is None else self.angles,
+        )
 
         # State tracking
         self.count = 0

@@ -947,6 +947,43 @@ class TestRandomWalk(BaseTest):
             hard_sphere_random_walk(**kwargs)
             assert "overlap the site two bonds back" in caplog.text
 
+    @pytest.mark.parametrize(
+        "theta_low, theta_high, expected",
+        [
+            (1.7, 2.2, "clean"),
+            (1.0, 2.2, "warn"),
+            (0.5, 1.0, "raise"),
+        ],
+    )
+    def test_joint_sampler_angle_range_against_radius(
+        self, theta_low, theta_high, expected, caplog
+    ):
+        from mbuild.path.points import AngleDihedralSampler
+
+        theta_grid = np.linspace(theta_low, theta_high, 6)
+        phi_grid = np.linspace(-np.pi, np.pi, 8, endpoint=False)
+        sampler = AngleDihedralSampler(
+            theta_grid, phi_grid, np.zeros((theta_grid.size, phi_grid.size))
+        )
+        kwargs = dict(
+            bead_name="A",
+            bond_length=0.285,
+            radius=0.392,
+            rw_angles=sampler,
+            termination=30,
+            seed=7,
+        )
+        if expected == "raise":
+            with pytest.raises(ValueError):
+                hard_sphere_random_walk(**kwargs)
+            return
+        path = hard_sphere_random_walk(**kwargs)
+        assert len(path.coordinates) == 30
+        if expected == "warn":
+            assert "overlap the site two bonds back" in caplog.text
+        else:
+            assert "overlap the site two bonds back" not in caplog.text
+
     def test_unbonded_branch_start_uses_radius(self):
         # Under linear connectivity the first site of the walk is not bonded to
         # the site it starts from, so it is placed no closer than the radius.
