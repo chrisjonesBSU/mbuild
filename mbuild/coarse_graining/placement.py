@@ -24,6 +24,8 @@ def generate_positions(
     templates,
     seed,
     all_atom=True,
+    n_twists=24,
+    twist_cutoff=0.6,
 ):
     """Compute a position for every atom in the resolved molecule.
 
@@ -33,9 +35,24 @@ def generate_positions(
     atoms bonded to other beads point toward those beads, then centered
     on the bead anchor.
 
+    Clashes resulting from back-mapping are further resolved by scanning
+    ``n_twists`` rotations and keeping the one that overlaps the already
+    placed atoms least. Beads are placed in sorted order, so each fragment
+    is oriented against its predecessors. Pass ``n_twists=0`` to leave the
+    twist as the orientation fit returns it.
+
     With ``all_atom=False`` the resolved nodes are finer coarse-grained
     beads rather than atoms. Local geometry then comes only from
     templates; a fragment without one raises ``ValueError``.
+
+    Parameters
+    ----------
+    n_twists : int, default 24
+        Rotations scanned when a fragment's twist is undetermined. Below 2
+        skips the scan.
+    twist_cutoff : float (nm), default 0.6
+        Placed atoms beyond this distance from a bead are ignored when
+        scoring its twist.
     """
     # Group atoms by primary bead
     bead_to_atoms = {}
@@ -95,12 +112,119 @@ def generate_positions(
                     sources.append(source / source_norm)
                     targets.append(target / target_norm)
         if sources:
-            rotation = kabsch(np.array(sources), np.array(targets))
-            local_xyz = local_xyz @ rotation.T
+            sources = np.array(sources)
+            targets = np.array(targets)
+            local_xyz = local_xyz @ kabsch(sources, targets).T
+            axis = _underdetermined_axis(sources, targets)
+            if axis is not None:
+                local_xyz = _resolve_twist(
+                    local_xyz,
+                    axis,
+                    group_anchor,
+                    positions,
+                    n_twists=n_twists,
+                    cutoff=twist_cutoff,
+                )
 
         for node in atoms:
             positions[node] = group_anchor + local_xyz[rel_index[node]]
     return positions
+
+
+def _underdetermined_axis(sources, targets, tol=1e-6):
+    """Return the axis a fragment remains free to rotate about, or None.
+
+    The orientation fit pins the one direction the junction vectors span
+    onto its image among the neighbor directions, which is the leading
+    right singular vector of the same covariance ``kabsch`` decomposes. For
+    a fragment with two junctions that direction is the local chain
+    tangent. Its sign is arbitrary and does not matter, since a full turn
+    is scanned about it.
+
+    Parameters
+    ----------
+    sources : np.ndarray (N, 3), required
+        Unit junction directions in the fragment's local frame.
+    targets : np.ndarray (N, 3), required
+        Unit directions from the fragment toward the neighboring beads.
+    tol : float, default 1e-6
+        Threshold on the singular values of the fit, relative to the
+        largest.
+
+    Returns
+    -------
+    np.ndarray (3,) or None
+        Unit axis when the fit leaves a rotation free. None when the fit
+        fixes the orientation, and also when it fixes no direction at all,
+        which leaves no single axis to scan about.
+    """
+    singular_values, right_vectors = np.linalg.svd(sources.T @ targets)[1:]
+    if singular_values[0] <= tol:
+        return None
+    if singular_values[1] > tol * singular_values[0]:
+        return None
+    return right_vectors[0]
+
+
+def _resolve_twist(
+    local_xyz, axis, group_anchor, positions, n_twists=24, cutoff=0.6
+):
+    """Rotate a fragment about an axis to its least overlapping orientation.
+
+    Scans ``n_twists`` evenly spaced rotations about ``axis`` and keeps the
+    one minimizing a soft repulsion against the atoms in ``positions`` that
+    lie within ``cutoff`` of ``group_anchor``.
+
+    Parameters
+    ----------
+    local_xyz : np.ndarray (M, 3), required
+        Fragment coordinates relative to its own centroid.
+    axis : np.ndarray (3,), required
+        Unit axis to rotate about.
+    group_anchor : np.ndarray (3,), required
+        Coordinate the fragment will be centered on.
+    positions : dict, required
+        Node to coordinate mapping of the atoms already placed.
+    n_twists : int, default 24
+        Rotations scanned over a full turn. Below 2 leaves the fragment
+        untouched.
+    cutoff : float (nm), default 0.6
+        Placed atoms beyond this distance from ``group_anchor`` are ignored.
+
+    Returns
+    -------
+    np.ndarray (M, 3)
+        The selected coordinates, unchanged when no placed atom lies within
+        ``cutoff``.
+    """
+    if n_twists < 2 or not positions:
+        return local_xyz
+    placed = np.array(list(positions.values()))
+    offsets = placed - group_anchor
+    near = placed[np.einsum("ij,ij->i", offsets, offsets) < cutoff * cutoff]
+    if near.size == 0:
+        return local_xyz
+
+    neighbors = near - group_anchor
+    best_xyz, best_score = local_xyz, np.inf
+    for angle in np.linspace(0.0, 2.0 * np.pi, n_twists, endpoint=False):
+        candidate = local_xyz @ _axis_rotation(axis, angle).T
+        deltas = candidate[:, None, :] - neighbors[None, :, :]
+        sq_distances = np.einsum("ijk,ijk->ij", deltas, deltas)
+        # Soft repulsion, so every close contact counts rather than the
+        # single closest one
+        score = float(np.sum(1.0 / np.maximum(sq_distances, 1e-12) ** 3))
+        if score < best_score:
+            best_xyz, best_score = candidate, score
+    return best_xyz
+
+
+def _axis_rotation(axis, angle):
+    """Rotation matrix for a right handed rotation about a unit axis."""
+    x, y, z = axis
+    cos, sin = np.cos(angle), np.sin(angle)
+    cross = np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]])
+    return cos * np.eye(3) + sin * cross + (1.0 - cos) * np.outer(axis, axis)
 
 
 def _embedded_fragment_coords(molecule, atoms, rel_index, embed_cache, seed):
