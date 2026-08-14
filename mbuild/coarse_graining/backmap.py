@@ -218,6 +218,7 @@ def backmap(
     seed=42,
     check_bonding=True,
     all_atom=None,
+    n_twists=24,
 ):
     """Backmap a coarse-grained system to an atomistic mbuild Compound.
 
@@ -295,6 +296,13 @@ def backmap(
         of the returned Compound is then a finer bead rather than an
         atom. Every fragment then needs a template to supply its local
         geometry, since there is no atomistic detail to embed.
+    n_twists : int, default 24
+        Rotations scanned when pointing a fragment's junction atoms at its
+        neighbors leaves the fragment free to twist about them, which is
+        the case for any fragment whose junction atoms are collinear with
+        its centroid. The twist that overlaps the already placed atoms
+        least is kept. Pass 0 to accept whatever twist the orientation fit
+        returns. See ``mbuild.coarse_graining.placement``.
 
     Returns
     -------
@@ -373,6 +381,7 @@ def backmap(
         templates=templates,
         seed=seed,
         all_atom=all_atom,
+        n_twists=n_twists,
     )
 
     return _molecule_to_compound(cg_graph, molecule, node_to_beads, positions)

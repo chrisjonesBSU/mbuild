@@ -765,3 +765,107 @@ class TestCoarseGraining(BaseTest):
         # CG beads carry no element, so their mass is 0/None, not usable
         with pytest.raises(ValueError, match="mass"):
             chain.coarse_grain(beads=["A"], center="mass")
+
+
+class TestFragmentTwist(BaseTest):
+    """Placement of fragments whose junction atoms leave a twist free."""
+
+    FRAG = "{#A=[>]CC[<]}"
+
+    @pytest.fixture
+    def template(self):
+        return {"A": mb.load("C{>}C{<}", smiles=True)}
+
+    @pytest.fixture
+    def walk(self):
+        """A non-planar backbone, so each bead's twist is independent."""
+        return hard_sphere_random_walk(
+            bead_name="A",
+            bond_length=0.285,
+            radius=0.25,
+            rw_angles=(np.radians(100), np.radians(120)),
+            termination=12,
+            seed=1001,
+        )
+
+    def _min_hydrogen_gap(self, compound):
+        xyz = np.array(
+            [p.pos for p in compound.particles() if p.element.symbol == "H"]
+        )
+        distances = np.linalg.norm(xyz[:, None, :] - xyz[None, :, :], axis=-1)
+        np.fill_diagonal(distances, np.inf)
+        return distances.min()
+
+    @pytest.mark.parametrize("bend_deg", [180.0, 120.0, 108.0, 60.0])
+    def test_free_axis_is_the_chain_tangent(self, bend_deg):
+        from mbuild.coarse_graining.placement import _underdetermined_axis
+
+        # Junction atoms on opposite sides of the centroid, as in any mid
+        # chain fragment of a linear polymer
+        sources = np.array([[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]])
+        bend = np.radians(bend_deg)
+        first = np.array([1.0, 0.0, 0.0])
+        second = np.array([np.cos(bend), np.sin(bend), 0.0])
+        axis = _underdetermined_axis(sources, np.array([first, second]))
+        assert axis is not None
+        assert np.isclose(np.linalg.norm(axis), 1.0)
+        tangent = first - second
+        tangent /= np.linalg.norm(tangent)
+        # Sign is arbitrary, a full turn is scanned about the axis either way
+        assert np.isclose(abs(np.dot(axis, tangent)), 1.0)
+
+    def test_independent_junctions_determine_the_orientation(self):
+        from mbuild.coarse_graining.placement import _underdetermined_axis
+
+        sources = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+        targets = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+        assert _underdetermined_axis(sources, targets) is None
+
+    def test_cancelling_junctions_have_no_axis(self):
+        from mbuild.coarse_graining.placement import _underdetermined_axis
+
+        # Both neighbors in the same direction leaves nothing determined
+        sources = np.array([[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]])
+        targets = np.array([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        assert _underdetermined_axis(sources, targets) is None
+
+    def test_axis_rotation_is_a_rotation(self):
+        from mbuild.coarse_graining.placement import _axis_rotation
+
+        axis = np.array([1.0, 2.0, -0.5])
+        axis /= np.linalg.norm(axis)
+        rotation = _axis_rotation(axis, 0.7)
+        assert np.allclose(rotation @ rotation.T, np.eye(3), atol=1e-10)
+        assert np.isclose(np.linalg.det(rotation), 1.0)
+        # The axis itself is left alone
+        assert np.allclose(rotation @ axis, axis, atol=1e-10)
+
+    def test_twist_scan_separates_hydrogens(self, walk, template):
+        without = walk.backmap(self.FRAG, seed=1, templates=template, n_twists=0)
+        with_scan = walk.backmap(self.FRAG, seed=1, templates=template, n_twists=24)
+        assert self._min_hydrogen_gap(with_scan) > 2 * self._min_hydrogen_gap(without)
+
+    def test_twist_scan_preserves_the_cg_coordinates(self, walk, template):
+        # The scan rotates fragments about their own axis, so bead centroids
+        # still land on the path they came from
+        compound = walk.backmap(self.FRAG, seed=1, templates=template, n_twists=24)
+        centroids = np.array([child.xyz.mean(axis=0) for child in compound.children])
+        assert np.allclose(centroids, walk.coordinates, atol=1e-5)
+
+    def test_twist_scan_is_reproducible(self, walk, template):
+        first = walk.backmap(self.FRAG, seed=1, templates=template, n_twists=24)
+        second = walk.backmap(self.FRAG, seed=1, templates=template, n_twists=24)
+        assert np.allclose(first.xyz, second.xyz)
+
+    def test_planar_path_is_barely_affected(self, template):
+        # Coplanar neighbor directions already pin the twist consistently
+        n = 12
+        index = np.arange(n)
+        coords = np.stack(
+            [index * 0.22, 0.1 * (-1.0) ** index, np.zeros(n)], axis=1
+        )
+        path = Path(coordinates=coords, bead_name="A")
+        path.form_linear_bond_graph()
+        without = path.backmap(self.FRAG, seed=1, templates=template, n_twists=0)
+        with_scan = path.backmap(self.FRAG, seed=1, templates=template, n_twists=24)
+        assert self._min_hydrogen_gap(with_scan) >= self._min_hydrogen_gap(without)
