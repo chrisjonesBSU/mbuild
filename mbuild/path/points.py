@@ -303,6 +303,280 @@ class AnglesSampler:
         return getattr(self.rng, self.distribution)(size=size, **self.kwargs)
 
 
+def min_bond_angle(bond_length, radius):
+    """Return the smallest bond angle that avoids a 1-3 overlap, in radians.
+
+    Sites two bonds apart are separated by ``2 bond_length sin(theta / 2)``,
+    so `check_path` rejects any bond angle below
+    ``2 arcsin(radius / (2 bond_length))``. Overlaps with sites further along
+    the chain are not accounted for.
+
+    Parameters
+    ----------
+    bond_length : float, required
+        Bond length of the walk, in nm.
+    radius : float, required
+        Hard-sphere exclusion distance, in nm. This is the center-to-center
+        minimum separation `check_path` enforces, not half of it.
+
+    Returns
+    -------
+    float
+        Minimum bond angle in radians.
+
+    Raises
+    ------
+    ValueError
+        If ``radius`` is at least twice ``bond_length``, where no bond angle
+        avoids the overlap.
+    """
+    ratio = float(radius) / (2.0 * float(bond_length))
+    if ratio >= 1.0:
+        raise ValueError(
+            f"{radius=} is at least twice {bond_length=}, so no bond angle "
+            "avoids an overlap with the site two bonds back."
+        )
+    return float(2.0 * np.arcsin(ratio))
+
+
+def _cosine_table(kappa, n_bins, min_angle):
+    """Return (bin centers, probabilities) for the cosine bending potential.
+
+    Bins are equal width over ``[min_angle, pi]`` and each is weighted by
+    ``sin(theta) exp(-kappa (1 + cos(theta)))``, normalized to sum to 1.
+    """
+    edges = np.linspace(float(min_angle), np.pi, int(n_bins) + 1)
+    angles = 0.5 * (edges[:-1] + edges[1:])
+    # p(theta) ~ sin(theta) exp(-U(theta) / kBT), in logs to survive large kappa.
+    # In logs so large kappa does not overflow.
+    log_weights = np.log(np.sin(angles)) - float(kappa) * (1.0 + np.cos(angles))
+    weights = np.exp(log_weights - log_weights.max())
+    return angles, weights / weights.sum()
+
+
+def _table_mean_cos(angles, probabilities):
+    """Mean cosine of the deflection angle for a tabulated bond angle."""
+    return float(-np.sum(probabilities * np.cos(angles)))
+
+
+def _ratio_from_mean_cos(mean_cos):
+    """Characteristic ratio from a mean deflection cosine."""
+    if mean_cos >= 1.0:
+        return np.inf
+    return float((1.0 + mean_cos) / (1.0 - mean_cos))
+
+
+class CosineAnglesSampler(AnglesSampler):
+    """Samples bond angles from the Faller-Muller-Plathe bending potential.
+
+    Builds a tabulated angle distribution and draws from it with
+    `numpy.random.Generator.choice`, so sampled angles are bin centers.
+
+    The potential is ``U(Theta) = kappa kBT (1 - cos Theta)``, where ``Theta``
+    is the angle between subsequent bonds. `random_coordinate` measures the
+    interior bond angle ``theta = pi - Theta`` and draws the azimuth
+    uniformly, so the table includes the ``sin(theta)`` measure of the sphere:
+
+        p(theta) ~ sin(theta) exp(-kappa (1 + cos(theta)))
+
+    ``kappa`` is dimensionless, already reduced by kBT, so no temperature is
+    needed.
+
+    Parameters
+    ----------
+    kappa : float, required
+        Bending stiffness in units of kBT. Positive favors extended chains,
+        negative favors folded ones, and 0 gives a freely jointed chain.
+    n_bins : int, default 360
+        Number of equal-width bins spanning ``[min_angle, pi]``. Sets the
+        angular resolution of the sampled angles.
+    min_angle : float, default 0.0
+        Lower edge of the table in radians. Angles below it are never drawn.
+        See `min_bond_angle` for the value a hard-sphere walk rejects anyway.
+    rng : numpy.random.Generator, optional
+        Defaults to numpy.random.default_rng(). `RandomWalkState` replaces
+        this with the walk's generator when the sampler is passed to
+        `hard_sphere_random_walk`.
+
+    Attributes
+    ----------
+    kappa, n_bins, min_angle : as passed in.
+
+    Notes
+    -----
+    `characteristic_ratio` and `kuhn_length` describe an ideal chain. A walk
+    with a finite ``radius`` rejects low-angle candidates and measures larger
+    values than both.
+
+    Examples
+    --------
+    >>> sampler = CosineAnglesSampler(kappa=1.5)
+    >>> round(sampler.characteristic_ratio, 3)
+    2.56
+
+    >>> sampler = CosineAnglesSampler(
+    ...     kappa=1.5, min_angle=min_bond_angle(bond_length=0.25, radius=0.22)
+    ... )
+    """
+
+    def __init__(self, kappa, n_bins=360, min_angle=0.0, rng=None):
+        n_bins = int(n_bins)
+        min_angle = float(min_angle)
+        if n_bins < 2:
+            raise ValueError(f"{n_bins=} must be at least 2.")
+        if not 0.0 <= min_angle < np.pi:
+            raise ValueError(f"{min_angle=} must be in [0, pi) radians.")
+        self.kappa = float(kappa)
+        self.n_bins = n_bins
+        self.min_angle = min_angle
+        angles, probabilities = _cosine_table(self.kappa, n_bins, min_angle)
+        super().__init__("choice", {"a": angles, "p": probabilities}, rng=rng)
+
+    @property
+    def bin_angles(self):
+        """Bond angles the sampler can return, in radians."""
+        return self.kwargs["a"]
+
+    @property
+    def probabilities(self):
+        """Probability of each entry in `bin_angles`, summing to 1."""
+        return self.kwargs["p"]
+
+    @property
+    def table(self):
+        """The (2, n_bins) angle and probability array, as `rw_angles` takes."""
+        return np.vstack((self.bin_angles, self.probabilities))
+
+    @property
+    def mean_cos_deflection(self):
+        """Mean cosine of the deflection angle, ``<cos Theta>``.
+
+        Computed from the table, so ``min_angle`` and ``n_bins`` are
+        reflected. With ``min_angle`` of 0 this converges to the Langevin
+        function ``coth(kappa) - 1 / kappa``.
+        """
+        return _table_mean_cos(self.bin_angles, self.probabilities)
+
+    @property
+    def characteristic_ratio(self):
+        """Ideal characteristic ratio, ``(1 + <cos Theta>) / (1 - <cos Theta>)``."""
+        return _ratio_from_mean_cos(self.mean_cos_deflection)
+
+    def kuhn_length(self, bond_length):
+        """Return the ideal Kuhn length, ``characteristic_ratio * bond_length``.
+
+        Parameters
+        ----------
+        bond_length : float, required
+            Bond length of the walk, in nm.
+
+        Returns
+        -------
+        float
+            Kuhn length in the units of ``bond_length``.
+        """
+        return float(bond_length) * self.characteristic_ratio
+
+    @classmethod
+    def from_characteristic_ratio(cls, c_infinity, n_bins=360, min_angle=0.0, rng=None):
+        """Create a sampler with a given ideal characteristic ratio.
+
+        Solves ``characteristic_ratio == c_infinity`` for ``kappa`` against
+        the table that ``n_bins`` and ``min_angle`` produce.
+
+        Parameters
+        ----------
+        c_infinity : float, required
+            Target characteristic ratio. Values below 1 give a negative
+            ``kappa``.
+        n_bins : int, default 360
+            Passed to the constructor and used during the solve.
+        min_angle : float, default 0.0
+            Passed to the constructor and used during the solve.
+        rng : numpy.random.Generator, optional
+
+        Returns
+        -------
+        CosineAnglesSampler
+
+        Raises
+        ------
+        ValueError
+            If ``c_infinity`` is not positive, or if no ``kappa`` reaches it
+            for the given ``n_bins`` and ``min_angle``.
+        """
+        from scipy.optimize import brentq
+
+        c_infinity = float(c_infinity)
+        if c_infinity <= 0.0:
+            raise ValueError(f"{c_infinity=} must be greater than 0.")
+        target = (c_infinity - 1.0) / (c_infinity + 1.0)
+
+        def mean_cos(kappa):
+            return _table_mean_cos(*_cosine_table(kappa, n_bins, min_angle))
+
+        # mean_cos rises monotonically in kappa, so the bracket ends bound it.
+        low, high = -700.0, 700.0
+        low_cos, high_cos = mean_cos(low), mean_cos(high)
+        if not low_cos <= target <= high_cos:
+            raise ValueError(
+                f"{c_infinity=} is outside the "
+                f"[{_ratio_from_mean_cos(low_cos):.4g}, "
+                f"{_ratio_from_mean_cos(high_cos):.4g}] this table can reach "
+                f"with {n_bins=} and {min_angle=}. Lower min_angle to reach a "
+                "floppier chain, or raise n_bins to reach a stiffer one."
+            )
+        kappa = brentq(lambda value: mean_cos(value) - target, low, high)
+        return cls(kappa, n_bins=n_bins, min_angle=min_angle, rng=rng)
+
+    @classmethod
+    def from_kuhn_length(
+        cls, kuhn_length, bond_length, n_bins=360, min_angle=0.0, rng=None
+    ):
+        """Create a sampler with a given ideal Kuhn length.
+
+        Divides by ``bond_length`` and defers to `from_characteristic_ratio`.
+
+        Parameters
+        ----------
+        kuhn_length : float, required
+            Target Kuhn length, in the same units as ``bond_length``.
+        bond_length : float, required
+            Bond length of the walk, in nm.
+        n_bins : int, default 360
+            Passed to `from_characteristic_ratio`.
+        min_angle : float, default 0.0
+            Passed to `from_characteristic_ratio`.
+        rng : numpy.random.Generator, optional
+
+        Returns
+        -------
+        CosineAnglesSampler
+
+        Raises
+        ------
+        ValueError
+            If ``bond_length`` is not positive, or as raised by
+            `from_characteristic_ratio`.
+        """
+        bond_length = float(bond_length)
+        if bond_length <= 0.0:
+            raise ValueError(f"{bond_length=} must be greater than 0.")
+        return cls.from_characteristic_ratio(
+            float(kuhn_length) / bond_length,
+            n_bins=n_bins,
+            min_angle=min_angle,
+            rng=rng,
+        )
+
+    def __repr__(self):
+        return (
+            f"CosineAnglesSampler(kappa={self.kappa:.4g}, "
+            f"n_bins={self.n_bins}, min_angle={self.min_angle:.4g}, "
+            f"c_infinity={self.characteristic_ratio:.4g})"
+        )
+
+
 def generate_trials(state):
     """Use normal or uniform sampling on angles, uniform sampling on radius."""
     thetas = state.angles.sample(size=state.trial_batch_size).astype(np.float32)

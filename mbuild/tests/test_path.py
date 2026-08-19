@@ -27,7 +27,11 @@ from mbuild.path.path_utils import (
     target_density,
     target_sq_distances,
 )
-from mbuild.path.points import AnglesSampler
+from mbuild.path.points import (
+    AnglesSampler,
+    CosineAnglesSampler,
+    min_bond_angle,
+)
 from mbuild.path.termination import (
     NumAttempts,
     NumSites,
@@ -1061,3 +1065,221 @@ class TestCrossLinks(BaseTest):
         path2.relax(0.2, None, steps=10)
         print(path1.coordinates - path2.coordinates)
         assert np.allclose(path1.coordinates, path2.coordinates, atol=1e-6)
+
+
+def langevin(kappa):
+    if kappa == 0:
+        return 0.0
+    return 1.0 / np.tanh(kappa) - 1.0 / kappa
+
+
+class TestCosineAnglesSampler:
+    def test_is_angles_sampler(self):
+        s = CosineAnglesSampler(kappa=1.0)
+        assert isinstance(s, AnglesSampler)
+        assert s.distribution == "choice"
+        assert set(s.kwargs) == {"a", "p"}
+
+    @pytest.mark.parametrize("kappa", [-1.0, -0.38, 0.0, 1.0, 2.29, 2.5, 5.0])
+    def test_table_normalized_and_in_range(self, kappa):
+        s = CosineAnglesSampler(kappa=kappa, n_bins=360)
+        assert s.probabilities.shape == s.bin_angles.shape == (360,)
+        assert np.isclose(s.probabilities.sum(), 1.0)
+        assert (s.probabilities >= 0).all()
+        assert (s.bin_angles > 0).all() and (s.bin_angles < np.pi).all()
+        assert s.table.shape == (2, 360)
+
+    @pytest.mark.parametrize("kappa", [-1.0, -0.38, 0.5, 1.0, 2.29, 2.5])
+    def test_mean_cos_matches_langevin(self, kappa):
+        """<cos Theta> must equal L(kappa), Svaneborg-Everaers eq 8.
+
+        This is the check that the sin(theta) Jacobian is present: drop it and
+        the table averages something else entirely.
+        """
+        s = CosineAnglesSampler(kappa=kappa, n_bins=2000)
+        assert s.mean_cos_deflection == pytest.approx(langevin(kappa), abs=1e-5)
+
+    def test_no_jacobian_would_fail(self):
+        """Guard the guard: a table without sin(theta) misses L(kappa)."""
+        kappa = 1.5
+        angles = np.linspace(0, np.pi, 2001)[1:-1]
+        w = np.exp(-kappa * (1.0 + np.cos(angles)))
+        w /= w.sum()
+        bad = float(-np.sum(w * np.cos(angles)))
+        assert abs(bad - langevin(kappa)) > 0.05
+
+    @pytest.mark.parametrize("kappa", [0.5, 1.0, 2.29])
+    def test_kuhn_length_matches_everaers_eq7(self, kappa):
+        s = CosineAnglesSampler(kappa=kappa, n_bins=2000)
+        m = langevin(kappa)
+        assert s.kuhn_length(0.965) == pytest.approx(
+            0.965 * (1 + m) / (1 - m), rel=1e-4
+        )
+
+    def test_kappa_zero_is_freely_jointed(self):
+        s = CosineAnglesSampler(kappa=0.0, n_bins=2000)
+        assert s.mean_cos_deflection == pytest.approx(0.0, abs=1e-6)
+        assert s.characteristic_ratio == pytest.approx(1.0, abs=1e-5)
+
+    def test_monotonic_in_kappa(self):
+        kappas = np.linspace(-3, 5, 40)
+        ratios = [CosineAnglesSampler(k).characteristic_ratio for k in kappas]
+        assert np.all(np.diff(ratios) > 0)
+
+    def test_empirical_draws_match_table(self):
+        """sample() reproduces the tabulated <cos Theta>."""
+        s = CosineAnglesSampler(kappa=2.0, rng=np.random.default_rng(42))
+        draws = s.sample(200_000)
+        assert draws.shape == (200_000,)
+        assert -np.cos(draws).mean() == pytest.approx(s.mean_cos_deflection, abs=5e-3)
+
+    def test_sample_scalar(self):
+        s = CosineAnglesSampler(kappa=1.0, rng=np.random.default_rng(0))
+        v = s.sample()
+        assert np.isscalar(v) or np.asarray(v).shape == ()
+
+    def test_rng_swap_is_respected(self):
+        """RandomWalkState overwrites .rng after construction."""
+        s = CosineAnglesSampler(kappa=1.0, rng=np.random.default_rng(0))
+        s.rng = np.random.default_rng(7)
+        a = s.sample(50)
+        s.rng = np.random.default_rng(7)
+        assert np.array_equal(a, s.sample(50))
+
+    # min_angle / hard-sphere truncation
+
+    def test_min_bond_angle(self):
+        assert min_bond_angle(0.25, 0.25) == pytest.approx(np.pi / 3)
+        assert min_bond_angle(1.0, 0.0) == 0.0
+        with pytest.raises(ValueError):
+            min_bond_angle(0.1, 0.25)
+
+    def test_min_angle_truncates(self):
+        lo = np.pi / 3
+        s = CosineAnglesSampler(kappa=1.0, min_angle=lo)
+        assert s.bin_angles.min() > lo
+        assert s.sample(10_000).min() > lo
+
+    def test_truncation_stiffens(self):
+        free = CosineAnglesSampler(kappa=0.0, n_bins=2000)
+        cut = CosineAnglesSampler(kappa=0.0, n_bins=2000, min_angle=np.pi / 3)
+        assert cut.characteristic_ratio > free.characteristic_ratio
+
+    @pytest.mark.parametrize("bad", [-0.1, np.pi, 4.0])
+    def test_bad_min_angle(self, bad):
+        with pytest.raises(ValueError):
+            CosineAnglesSampler(kappa=1.0, min_angle=bad)
+
+    @pytest.mark.parametrize("bad", [0, 1, -3])
+    def test_bad_n_bins(self, bad):
+        with pytest.raises(ValueError):
+            CosineAnglesSampler(kappa=1.0, n_bins=bad)
+
+    # inverse constructors
+
+    @pytest.mark.parametrize("c_infinity", [0.4, 1.0, 1.7, 3.0, 6.0, 12.0])
+    def test_from_characteristic_ratio_roundtrips(self, c_infinity):
+        s = CosineAnglesSampler.from_characteristic_ratio(c_infinity, n_bins=2000)
+        assert s.characteristic_ratio == pytest.approx(c_infinity, rel=1e-6)
+
+    @pytest.mark.parametrize("c_infinity", [0.5, 2.0, 5.0])
+    def test_from_characteristic_ratio_matches_langevin_inverse(self, c_infinity):
+        s = CosineAnglesSampler.from_characteristic_ratio(c_infinity, n_bins=4000)
+        assert langevin(s.kappa) == pytest.approx(
+            (c_infinity - 1) / (c_infinity + 1), abs=1e-4
+        )
+
+    def test_from_characteristic_ratio_roundtrips_when_truncated(self):
+        """The solve accounts for min_angle rather than ignoring it."""
+        lo = min_bond_angle(bond_length=0.25, radius=0.22)
+        s = CosineAnglesSampler.from_characteristic_ratio(
+            3.0, n_bins=2000, min_angle=lo
+        )
+        assert s.characteristic_ratio == pytest.approx(3.0, rel=1e-6)
+        naive = CosineAnglesSampler.from_characteristic_ratio(3.0, n_bins=2000)
+        assert s.kappa < naive.kappa  # truncation already stiffens, needs less
+
+    @pytest.mark.parametrize("kappa", [-0.9, 0.0, 1.3, 2.5])
+    def test_kappa_roundtrip(self, kappa):
+        s = CosineAnglesSampler(kappa=kappa, n_bins=2000)
+        back = CosineAnglesSampler.from_characteristic_ratio(
+            s.characteristic_ratio, n_bins=2000
+        )
+        assert back.kappa == pytest.approx(kappa, abs=1e-6)
+
+    def test_from_kuhn_length(self):
+        s = CosineAnglesSampler.from_kuhn_length(
+            kuhn_length=1.8, bond_length=0.5, n_bins=2000
+        )
+        assert s.kuhn_length(0.5) == pytest.approx(1.8, rel=1e-6)
+
+    def test_from_kuhn_length_bad_bond_length(self):
+        with pytest.raises(ValueError):
+            CosineAnglesSampler.from_kuhn_length(1.0, 0.0)
+
+    @pytest.mark.parametrize("bad", [0.0, -1.0])
+    def test_from_characteristic_ratio_nonpositive(self, bad):
+        with pytest.raises(ValueError):
+            CosineAnglesSampler.from_characteristic_ratio(bad)
+
+    def test_unreachable_target_raises(self):
+        """min_angle puts a floor of tan^2(min_angle / 2) on the ratio."""
+        lo = np.pi / 3  # floor is tan^2(30 deg) = 1/3
+        with pytest.raises(ValueError, match="outside"):
+            CosineAnglesSampler.from_characteristic_ratio(0.2, min_angle=lo)
+
+    def test_repr(self):
+        assert "CosineAnglesSampler(kappa=" in repr(CosineAnglesSampler(1.0))
+
+
+class TestCosineAnglesSamplerInWalk:
+    """The sampler drives an actual hard-sphere walk."""
+
+    def test_accepted_by_hard_sphere_random_walk(self):
+        s = CosineAnglesSampler(kappa=2.0)
+        path = mb.path.hard_sphere_random_walk(
+            termination=50, bond_length=0.25, radius=0.22, rw_angles=s, seed=12
+        )
+        assert len(path.coordinates) == 50
+
+    def test_table_array_gives_same_walk(self):
+        """The (2, N) table is accepted directly as rw_angles."""
+        s = CosineAnglesSampler(kappa=2.0)
+        kwargs = {"termination": 40, "bond_length": 0.25, "radius": 0.22, "seed": 5}
+        a = mb.path.hard_sphere_random_walk(rw_angles=s, **kwargs).coordinates
+        b = mb.path.hard_sphere_random_walk(rw_angles=s.table, **kwargs).coordinates
+        assert np.allclose(a, b)
+
+    def test_chain_size_increases_with_kappa(self):
+        def mean_r2(kappa):
+            vals = []
+            for seed in range(12):
+                xyz = mb.path.hard_sphere_random_walk(
+                    termination=100,
+                    bond_length=0.25,
+                    radius=0.22,
+                    rw_angles=CosineAnglesSampler(kappa=kappa),
+                    seed=seed,
+                ).coordinates
+                vals.append(np.sum((xyz[-1] - xyz[0]) ** 2))
+            return np.mean(vals)
+
+        assert mean_r2(0.0) < mean_r2(2.0) < mean_r2(4.0)
+
+    def test_walk_bond_angles_follow_the_table(self):
+        """Measured 1-2-3 angles in a built chain track the sampler.
+
+        The walk is stiffer than the ideal sampler because it rejects
+        overlaps, so this checks the direction and rough magnitude, not
+        equality.
+        """
+        lo = min_bond_angle(bond_length=0.25, radius=0.22)
+        s = CosineAnglesSampler(kappa=1.5, min_angle=lo)
+        xyz = mb.path.hard_sphere_random_walk(
+            termination=400, bond_length=0.25, radius=0.22, rw_angles=s, seed=3
+        ).coordinates
+        v = np.diff(xyz, axis=0)
+        v /= np.linalg.norm(v, axis=1)[:, None]
+        measured = np.sum(v[:-1] * v[1:], axis=1).mean()  # <cos Theta>
+        assert measured >= s.mean_cos_deflection - 0.05
+        assert measured < 1.0
