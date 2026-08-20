@@ -412,9 +412,12 @@ class CosineAnglesSampler(AnglesSampler):
 
     Notes
     -----
-    `characteristic_ratio` and `kuhn_length` describe an ideal chain. A walk
-    with a finite ``radius`` rejects low-angle candidates and measures larger
-    values than both.
+    `characteristic_ratio` and `kuhn_length`, and the `from_kuhn_length` and
+    `from_characteristic_ratio` constructors that invert them, all describe an
+    ideal chain with no excluded volume. A built walk measures larger values,
+    as a real melt does: eq 24 of Everaers et al. adds an empirical
+    ``delta l_K`` on top of the ideal Kuhn length. Measure a built path rather
+    than assuming the requested value when the difference matters.
 
     Examples
     --------
@@ -467,7 +470,13 @@ class CosineAnglesSampler(AnglesSampler):
 
     @property
     def characteristic_ratio(self):
-        """Ideal characteristic ratio, ``(1 + <cos Theta>) / (1 - <cos Theta>)``."""
+        """Ideal characteristic ratio, ``(1 + <cos Theta>) / (1 - <cos Theta>)``.
+
+        This is the freely rotating chain value, excluded volume absent. It
+        is the ``l_K(0) / bond_length`` of Svaneborg and Everaers eq 7, not
+        the Kuhn length of a melt, which eq 24 of Everaers et al. puts higher
+        by an additive ``delta l_K``. A built walk measures higher still.
+        """
         return _ratio_from_mean_cos(self.mean_cos_deflection)
 
     def kuhn_length(self, bond_length):

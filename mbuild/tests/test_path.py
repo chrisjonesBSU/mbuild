@@ -1,3 +1,5 @@
+import logging
+
 import numpy as np
 import pytest
 
@@ -1368,3 +1370,51 @@ class TestCosineAnglesSamplerInWalk:
         measured = np.sum(v[:-1] * v[1:], axis=1).mean()  # <cos Theta>
         assert measured >= s.mean_cos_deflection - 0.05
         assert measured < 1.0
+
+    def test_kg_bond_length_tracks_table(self):
+        """A KG bond length, lb = 0.965 sigma, needs the 1-2 exclusion.
+
+        With min_angle set, the measured <cos Theta> stays near the table.
+        """
+        sigma = 0.25
+        bond_length = 0.965 * sigma
+        lo = min_bond_angle(bond_length=bond_length, radius=sigma)
+        s = CosineAnglesSampler(kappa=2.5, min_angle=lo, n_bins=720)
+        measured = []
+        for seed in range(8):
+            xyz = mb.path.hard_sphere_random_walk(
+                termination=200,
+                bond_length=bond_length,
+                radius=sigma,
+                rw_angles=s,
+                seed=seed,
+            ).coordinates
+            v = np.diff(xyz, axis=0)
+            v /= np.linalg.norm(v, axis=1)[:, None]
+            measured.append(np.sum(v[:-1] * v[1:], axis=1))
+        mean_cos = np.concatenate(measured).mean()
+        assert mean_cos == pytest.approx(s.mean_cos_deflection, abs=0.02)
+
+    def test_min_angle_silences_rejection_warning(self, caplog):
+        """Matching min_angle to the geometry leaves nothing to warn about."""
+        sigma = 0.25
+        bond_length = 0.965 * sigma
+        lo = min_bond_angle(bond_length=bond_length, radius=sigma)
+        kwargs = {
+            "termination": 20,
+            "bond_length": bond_length,
+            "radius": sigma,
+            "seed": 1,
+        }
+        with caplog.at_level(logging.WARNING, logger="mbuild.path.build"):
+            mb.path.hard_sphere_random_walk(
+                rw_angles=CosineAnglesSampler(kappa=2.5), **kwargs
+            )
+        assert "overlap the site two bonds back" in caplog.text
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="mbuild.path.build"):
+            mb.path.hard_sphere_random_walk(
+                rw_angles=CosineAnglesSampler(kappa=2.5, min_angle=lo), **kwargs
+            )
+        assert "overlap the site two bonds back" not in caplog.text
