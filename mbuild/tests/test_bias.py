@@ -286,7 +286,7 @@ class TestBias(BaseTest):
         assert bias.last_weight is None and bias.last_r is None
 
         def weight_at(distance):
-            bias._adaptive_score_params(np.array([distance, 0.0, 0.0]))
+            bias._adaptive_weight(np.array([distance, 0.0, 0.0]))
             return bias.last_r, bias.last_weight
 
         # Beyond capture_radius the ramp holds at weight
@@ -302,7 +302,7 @@ class TestBias(BaseTest):
         assert np.all(np.diff(weights) >= 0)
 
     def test_target_coordinate_adapt_sharpness(self):
-        """adapt_sharpness > 1 holds the weight nearer weight until closer in."""
+        """adapt_sharpness > 1 ramps later, < 1 ramps earlier."""
 
         def weight_at(sharpness, distance):
             bias = TargetCoordinate(
@@ -312,7 +312,7 @@ class TestBias(BaseTest):
                 termination_radius=0.5,
                 adapt_sharpness=sharpness,
             )
-            bias._adaptive_score_params(np.array([distance, 0.0, 0.0]))
+            bias._adaptive_weight(np.array([distance, 0.0, 0.0]))
             return bias.last_weight
 
         assert weight_at(3.0, 1.25) < weight_at(1.0, 1.25) < weight_at(0.3, 1.25)
@@ -322,7 +322,7 @@ class TestBias(BaseTest):
             assert weight_at(sharpness, 0.5) == pytest.approx(1.0)
 
     def test_target_coordinate_capture_radius_reaches_target(self):
-        """A ramped weight closes on the target where a fixed weight lingers."""
+        """A ramped walk terminates inside the terminator's distance."""
         terminator = WithinCoordinate(target_coordinate=(2, 2, 2), distance=0.3)
         termination = Termination([terminator, NumAttempts(5e4)])
         kwargs = dict(
@@ -340,3 +340,41 @@ class TestBias(BaseTest):
         path = hard_sphere_random_walk(termination=termination, bias=adaptive, **kwargs)
         end_distance = np.linalg.norm(path.coordinates[-1] - np.array([2, 2, 2]))
         assert end_distance <= 0.3 + terminator.tolerance
+
+    def test_score_affine_invariance(self):
+        """Scores rank candidates identically under any positive affine rescale."""
+        bias = TargetCoordinate(target_coordinate=(3, 3, 3), weight=0.6)
+        signal = np.array([0.1, 4.2, 1.7, 3.3, 0.9, 2.5])
+        for scale, offset in [(1.0, 0.0), (1e3, 0.0), (1e-3, 0.0), (7.0, 250.0)]:
+            bias.rng = np.random.default_rng(5)
+            baseline = np.argsort(bias._score(signal))
+            bias.rng = np.random.default_rng(5)
+            rescaled = np.argsort(bias._score(signal * scale + offset))
+            assert np.array_equal(baseline, rescaled)
+
+    def test_score_flat_signal_is_random(self):
+        """A signal carrying no information leaves ordering to noise."""
+        bias = TargetCoordinate(target_coordinate=(3, 3, 3), weight=0.6)
+        bias.rng = np.random.default_rng(5)
+        orders = {tuple(np.argsort(bias._score(np.full(6, 2.0)))) for _ in range(50)}
+        assert len(orders) > 1
+
+    def test_score_weight_controls_signal_to_noise(self):
+        """Higher weight follows the signal more closely, at any signal scale."""
+        signal = np.arange(20, dtype=float)
+        best = np.argmin(signal)
+        for scale in (1e-3, 1.0, 1e3):
+            picked = {}
+            for weight in (0.2, 0.9):
+                bias = TargetCoordinate(target_coordinate=(0, 0, 0), weight=weight)
+                bias.rng = np.random.default_rng(5)
+                picked[weight] = np.mean(
+                    [
+                        np.argsort(bias._score(signal * scale))[0] == best
+                        for _ in range(400)
+                    ]
+                )
+            assert picked[0.9] > picked[0.2]
+            # A given weight behaves the same at every signal scale
+            assert picked[0.9] > 0.85
+            assert 0.1 < picked[0.2] < 0.6

@@ -9,6 +9,17 @@ from mbuild.path.path_utils import (
 
 
 class Bias:
+    """Base class for biases applied to candidate sites in a random walk.
+
+    Sub classes measure a signal over candidate sites and rank them with `_score`.
+
+    Parameters
+    ----------
+    weight : float, required
+        Bias weight in (0, 1]. 1 ranks candidates by the signal alone; values
+        approaching 0 rank them close to randomly.
+    """
+
     def __init__(self, weight):
         if weight <= 0 or weight > 1:
             raise ValueError(
@@ -22,6 +33,22 @@ class Bias:
         """Map a bias weight onto (beta, noise_scale) used to score candidates."""
         # Large beta diminishes the effect of noise
         return weight / max(1e-6, (1.0 - weight)), 1.0 - weight
+
+    def _score(self, signal, weight=None):
+        """Score candidates by their signal plus noise scaled to the signal's spread.
+
+        Scores use `self.weight` unless `weight` overrides it for this step.
+        A flat signal is ordered by noise alone.
+        """
+        if weight is None:
+            beta, noise_scale = self.beta, self.noise_scale
+        else:
+            beta, noise_scale = self._score_params(weight)
+        spread = np.std(signal)
+        if spread == 0:
+            spread = 1.0
+        noise = self.rng.normal(0.0, noise_scale * spread, size=signal.shape)
+        return beta * signal + noise
 
     def _attach_path(self, path, state):
         """Create access Path and RandomWalkState used by hard_sphere_random_walk."""
@@ -48,13 +75,8 @@ class Bias:
 class TargetCoordinate(Bias):
     """Bias next-moves so that ones moving closer to a target coordinate are more likely to be accepted.
 
-    By default a single fixed `weight` is used for the entire walk. Setting
-    `capture_radius` adds an endgame: the walk keeps running at `weight` while
-    further from the target than `capture_radius`, then ramps up to a weight of
-    1 as it closes on `termination_radius`. This prevents a walk from circling
-    just outside its termination distance instead of committing to the target.
-
-    The effective weight at a distance `d` from the target is::
+    Applies a fixed `weight` at every step unless `capture_radius` is set, in
+    which case the weight at a distance `d` from the target is::
 
         r = clip((capture_radius - d) / (capture_radius - termination_radius), 0, 1)
         weight_eff = weight + (1 - weight) * r ** adapt_sharpness
@@ -64,32 +86,29 @@ class TargetCoordinate(Bias):
     target_coordinate : array-like (3,), required
         The target coordinate in units of nm.
     weight : float, required
-        Bias weight in (0, 1]. Used for every step when `capture_radius` is
-        None, otherwise the weight used while outside `capture_radius`.
+        Bias weight in (0, 1]. Applied at every step when `capture_radius` is
+        None, otherwise while outside `capture_radius`.
     capture_radius : float or "auto", optional, default=None
-        Distance (nm) at which the weight starts ramping up. None keeps the
-        fixed-weight behavior. "auto" resolves to 10 * bond_length once the
-        bias is attached to a walk. Must be larger than `termination_radius`.
+        Distance (nm) at which the weight begins ramping up. "auto" resolves to
+        10 * bond_length when the bias is attached to a walk. Must be larger
+        than `termination_radius`.
     termination_radius : float, optional, default=None
-        Distance (nm) at which the weight reaches 1; set this to the walk's own
-        termination distance. Required when `capture_radius` is given, unless
-        `terminator` supplies it.
+        Distance (nm) at which the weight reaches 1. Required when
+        `capture_radius` is given, unless `terminator` supplies it.
     terminator : mbuild.path.termination.WithinCoordinate, optional, default=None
-        Reads `termination_radius` from `terminator.distance` and validates
-        `terminator.target_coordinate` against `target_coordinate`, keeping the
-        bias and the walk's termination condition in sync. Mutually exclusive
-        with `termination_radius`.
+        Takes `termination_radius` from `terminator.distance` and validates
+        `terminator.target_coordinate` against `target_coordinate`. Mutually
+        exclusive with `termination_radius`.
     adapt_sharpness : float, optional, default=1.0
-        Exponent applied to the ramp. 1.0 ramps linearly, > 1.0 holds the
-        weight near `weight` for longer then rises sharply near the target,
-        < 1.0 rises earlier and more gradually.
+        Ramp exponent. 1.0 ramps linearly, > 1.0 ramps later and more sharply,
+        < 1.0 ramps earlier and more gradually.
 
     Attributes
     ----------
     last_r : float or None
         Ramp fraction in [0, 1] used on the most recent step.
     last_weight : float or None
-        Effective weight used on the most recent step.
+        Weight used on the most recent step.
     """
 
     def __init__(
@@ -170,15 +189,15 @@ class TargetCoordinate(Bias):
             self._capture_radius = 10.0 * state.bond_length
             self._validate_radii(self._capture_radius)
 
-    def _adaptive_score_params(self, current_coordinate):
-        """Return (beta, noise_scale) for a weight ramped by distance to the target."""
+    def _adaptive_weight(self, current_coordinate):
+        """Return the weight for this step, ramped by distance to the target."""
         distance = np.linalg.norm(self.target_coordinate - current_coordinate)
         span = max(self._capture_radius - self.termination_radius, 1e-12)
         r = float(np.clip((self._capture_radius - distance) / span, 0.0, 1.0))
         weight = self.weight + (1.0 - self.weight) * (r**self.adapt_sharpness)
         self.last_r = r
         self.last_weight = weight
-        return self._score_params(weight)
+        return weight
 
     def __call__(self, candidates, coordinates, names):
         """Sorts a set of candidate coordinates according to the bias.
@@ -198,12 +217,11 @@ class TargetCoordinate(Bias):
             Returns the original candidate array, sorted according to the bias.
         """
         if self.capture_radius is None:
-            beta, noise_scale = self.beta, self.noise_scale
+            weight = None
         else:
-            beta, noise_scale = self._adaptive_score_params(coordinates[-1])
+            weight = self._adaptive_weight(coordinates[-1])
         sq_distances = self._target_sq_distances(self.target_coordinate, candidates)
-        noise = self.rng.normal(0, noise_scale, size=sq_distances.shape)
-        scores = beta * sq_distances + noise
+        scores = self._score(sq_distances, weight=weight)
         # Target coordinate should favor short distances, sort in ascending order (np default)
         sort_idx = np.argsort(scores)
         return candidates[sort_idx]
@@ -234,8 +252,7 @@ class AvoidCoordinate(Bias):
             Returns the original candidate array, sorted according to the bias.
         """
         sq_distances = self._target_sq_distances(self.avoid_coordinate, candidates)
-        noise = self.rng.normal(0, self.noise_scale, size=sq_distances.shape)
-        scores = self.beta * sq_distances + noise
+        scores = self._score(sq_distances)
         # Avoid cooardinate should favor larger distances, sort in descending order
         sort_idx = np.argsort(scores)[::-1]
         return candidates[sort_idx]
@@ -271,8 +288,7 @@ class TargetType(Bias):
         densities = self._target_density(
             candidates=candidates, target_coords=target_coords, r_cut=self.r_cut
         )
-        noise = self.rng.normal(0, self.noise_scale, size=densities.shape)
-        scores = self.beta * densities + noise
+        scores = self._score(densities)
         # Target type should favor larger densities, sort in descending order
         sort_idx = np.argsort(scores)[::-1]
         return candidates[sort_idx]
@@ -307,8 +323,7 @@ class AvoidType(Bias):
         densities = self._target_density(
             candidates=candidates, target_coords=target_coords, r_cut=self.r_cut
         )
-        noise = self.rng.normal(0, self.noise_scale, size=densities.shape)
-        scores = self.beta * densities + noise
+        scores = self._score(densities)
         # Avoid type should favor smaller densities, sort in ascending order (np default)
         sort_idx = np.argsort(scores)
         return candidates[sort_idx]
@@ -350,8 +365,7 @@ class TargetDirection(Bias):
         next_step_unit_vectors = next_step_vectors / norms
         # Alignment score: dot product with target direction
         alignment = np.dot(next_step_unit_vectors, self.direction)
-        noise = self.rng.normal(0.0, self.noise_scale, size=alignment.shape)
-        scores = self.beta * alignment + noise
+        scores = self._score(alignment)
         # Larger dot product = better alignment with target, sort descending
         sort_idx = np.argsort(scores)[::-1]
         return candidates[sort_idx]
@@ -389,8 +403,7 @@ class AvoidDirection(Bias):
         next_step_unit_vectors = next_step_vectors / norms
         # Alignment score: dot product with target direction
         alignment = np.dot(next_step_unit_vectors, self.direction)
-        noise = self.rng.normal(0.0, self.noise_scale, size=alignment.shape)
-        scores = self.beta * alignment + noise
+        scores = self._score(alignment)
         # Larger dot product = better alignment with target, sort ascending (np default)
         sort_idx = np.argsort(scores)
         return candidates[sort_idx]
