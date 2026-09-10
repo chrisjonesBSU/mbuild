@@ -453,6 +453,35 @@ class TestRandomWalk(BaseTest):
         assert np.allclose(path.coordinates, expected.coordinates)
         assert set(path.bond_graph.edges) == set(expected.bond_graph.edges)
 
+    @pytest.mark.parametrize("seed", [0, 3, 5, 7])
+    def test_initial_point_index_wraps_into_periodic_box(self, seed):
+        """A walk started from a site near a face stays inside a periodic box.
+
+        The site index branch places its first site a bond length off an
+        existing site, which can land outside the box. On a periodic axis that
+        point must be wrapped back in rather than stored as-is. These seeds all
+        place that site outside the box when the wrap is removed.
+        """
+        L = 4.0
+        box = CuboidConstraint(Lx=L, Ly=L, Lz=L, pbc=(True, True, True))
+        # A single site sitting hard against the +x face, so a bond length step
+        # off it falls outside the box for roughly half of the candidates.
+        path = Path(coordinates=np.array([[L / 2 - 0.01, 0.0, 0.0]]))
+        hard_sphere_random_walk(
+            path=path,
+            termination=Termination([NumSites(12), NumAttempts(1e4)]),
+            bond_length=0.25,
+            radius=0.22,
+            initial_point=0,
+            connectivity="link-linear",
+            volume_constraint=box,
+            seed=seed,
+        )
+        coords = path.coordinates
+        assert len(coords) > 1
+        outside = ((coords < -L / 2) | (coords >= L / 2)).any(axis=1)
+        assert not outside.any(), f"sites outside the periodic box: {coords[outside]}"
+
     def test_initial_point_bad_type(self):
         for bad in [2.5, np.array([1, 2]), "2"]:
             with pytest.raises(ValueError):

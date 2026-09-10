@@ -3,7 +3,6 @@ import logging
 import numpy as np
 
 from mbuild.exceptions import PathConvergenceError
-from mbuild.path.constraints import CuboidConstraint, CylinderConstraint
 
 logger = logging.getLogger(__name__)
 
@@ -212,28 +211,11 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
                 candidates=xyzs, coordinates=bias_coords, names=bias_names
             )
 
-        # Set up PBC info from volume constraints
-        if isinstance(state.volume_constraint, CuboidConstraint):
-            pbc = state.volume_constraint.pbc
-            box_lengths = state.volume_constraint.box_lengths.astype(np.float32)
-        elif isinstance(state.volume_constraint, CylinderConstraint):
-            pbc = (False, False, state.volume_constraint.periodic_height)
-            box_lengths = np.array(
-                [
-                    state.volume_constraint.radius * 2,
-                    state.volume_constraint.radius * 2,
-                    state.volume_constraint.height,
-                ]
-            ).astype(np.float32)
-        else:
-            pbc = (None, None, None)
-            box_lengths = (None, None, None)
-
         for i in range(len(xyzs)):
             xyz = xyzs[i]
-            if any(pbc):
+            if any(state.pbc):
                 xyz = state.volume_constraint.mins + np.mod(
-                    xyz - state.volume_constraint.mins, box_lengths
+                    xyz - state.volume_constraint.mins, state.box_lengths
                 )
             if check_path(  # check for overlaps
                 existing_points=existing_points,
