@@ -75,6 +75,12 @@ def get_second_point(state, existing_points, beads, check_path, next_step):
     if state.bias:
         xyzs = state.bias(candidates=xyzs, coordinates=existing_points, names=beads)
 
+    if any(state.pbc):
+        xyzs = (
+            state.volume_constraint.mins
+            + np.mod(xyzs - state.volume_constraint.mins, state.box_lengths)
+        ).astype(np.float32)
+
     excluded_indices = state.excluded_indices()
     for xyz in xyzs:
         if check_path(
