@@ -88,6 +88,8 @@ def get_second_point(state, existing_points, beads, check_path, next_step):
             new_point=xyz,
             radius=state.radius,
             tolerance=state.tolerance,
+            pbc=state.pbc,
+            box_lengths=state.box_lengths,
             excluded_indices=excluded_indices,
         ):
             return xyz
@@ -167,6 +169,8 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
             new_point=state.initial_point,
             radius=state.radius,
             tolerance=state.tolerance,
+            pbc=state.pbc,
+            box_lengths=state.box_lengths,
             excluded_indices=excluded_indices,
         ):
             return state.initial_point
@@ -236,6 +240,8 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
                 new_point=xyz,
                 radius=state.radius,
                 tolerance=state.tolerance,
+                pbc=state.pbc,
+                box_lengths=state.box_lengths,
                 excluded_indices=excluded_indices,
             ):
                 return xyz
@@ -259,6 +265,8 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
                 new_point=xyz,
                 radius=state.radius,
                 tolerance=state.tolerance,
+                pbc=state.pbc,
+                box_lengths=state.box_lengths,
                 excluded_indices=excluded_indices,
             ):
                 return xyz
@@ -282,6 +290,8 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
                 new_point=xyz,
                 radius=state.radius,
                 tolerance=state.tolerance,
+                pbc=state.pbc,
+                box_lengths=state.box_lengths,
                 excluded_indices=excluded_indices,
             ):
                 return xyz
