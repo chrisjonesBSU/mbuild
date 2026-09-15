@@ -439,8 +439,12 @@ class TestHoomdSimulation(BaseTest):
         path = _make_two_type_path(n=6)
         pff = PathForcefield(radius=0.4, bond_length={"A-B": 0.25})
         sim = HoomdSimulation(path, forcefield=pff, r_cut=0.5, run_on_gpu=False)
-        fene = sim.forces[1]
-        assert fene.params["A-B"]["sigma"] == pytest.approx(0.25)
+        harmonic = hoomd.md.bond.Harmonic()
+        for force in sim.forces:
+            if isinstance(force, hoomd.md.bond.Harmonic):
+                harmonic = force
+                break
+        assert harmonic.params["A-B"]["r0"] == pytest.approx(0.25)
 
     @pytest.mark.skipif(not has_hoomd, reason="hoomd is not installed")
     def test_path_auto_per_type(self):
@@ -783,6 +787,29 @@ class TestHoomdSimulation(BaseTest):
         )
         assert wider_cut.forces is not bigger.forces
         assert wider_cut.forces is not sim.forces
+
+    @pytest.mark.skipif(not has_hoomd, reason="hoomd is not installed")
+    def test_relax_path(self):
+        from mbuild.path.build import Path
+
+        bond_length = 1  # target, starting at lengths of (2,1)
+        bead_radius = 0.5
+
+        xcoords = np.concat((np.arange(0, 10, 2), np.arange(1, 10, 4)))
+        xcoords.sort()
+        coords = np.zeros((len(xcoords), 3))
+        coords[:, 0] = xcoords
+        path = Path(coords)
+        path.form_linear_bond_graph()
+        with pytest.raises(RuntimeError):
+            path.relax(bead_radius=bead_radius, bond_length=bond_length, btype="fene")
+        path.relax(bead_radius=bead_radius, bond_length=bond_length)
+        bond_lengths = [
+            np.linalg.norm(path.coordinates[i] - path.coordinates[i + 1])
+            for i in range(len(path) - 1)
+        ]
+        assert path
+        assert max(bond_lengths) < bond_length + 0.05  # converges to target
 
 
 class TestOpenMMSimulation(BaseTest):
