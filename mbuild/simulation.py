@@ -99,9 +99,9 @@ class HoomdSimulation(hoomd.simulation.Simulation):
         elif run_on_gpu:
             try:
                 device = hoomd.device.GPU()
-                print(f"GPU found, running on device {device.device}")
+                logger.info(f"GPU found, running on device {device.device}")
             except RuntimeError:
-                print(
+                logger.info(
                     "Unable to find compatible GPU device. "
                     "Set `run_on_gpu = False` or see HOOMD documentation."
                 )
@@ -117,7 +117,13 @@ class HoomdSimulation(hoomd.simulation.Simulation):
         self.box_buffer = box_buffer
         self.box = box
         self.energies = []
+        self._resolve_compound_box()
+        box_lengths = np.asarray(self.compound.box.lengths, dtype=float)
 
+        self.compound.xyz, self._centered = _normalize_to_box_convention(
+            self.compound.xyz, box_lengths
+        )
+        self._frame_offset = self._frame_offset_for(box_lengths)
         self._get_integrate_group()
 
         # State and forces are built together, so reuse them only when every
@@ -131,11 +137,6 @@ class HoomdSimulation(hoomd.simulation.Simulation):
             compound._add_sim_data(
                 state=snapshot, forces=self.forces, build_params=self._build_params()
             )
-
-        # Undo the translation to -L/2 L/2 used by HOOMD
-        self._frame_offset = self.compound.xyz.mean(axis=0) - np.asarray(
-            snapshot.particles.position
-        ).mean(axis=0)
 
         self.active_forces = []
         self._orig_force_params = {}
@@ -158,8 +159,8 @@ class HoomdSimulation(hoomd.simulation.Simulation):
         ----------
         n_steps : int
             Number of timesteps to run.
-        kT : float
-            Thermal energy of the thermostat.
+        kT : float or list of float
+            Thermal energy. A list of two values ramps between them (kT_start, kT_finish).
         dt : float
             Timestep size.
         tau : float
@@ -176,12 +177,21 @@ class HoomdSimulation(hoomd.simulation.Simulation):
         else:
             self.active_forces = list(self.forces)
 
+        # Set kT ramp if user passed in a [start, finish] kT:
+        if isinstance(kT, (list, tuple, np.ndarray)):
+            thermal_kT = kT[0]
+            kT = hoomd.variant.Ramp(
+                A=kT[0], B=kT[1], t_start=self.timestep, t_ramp=int(n_steps)
+            )
+        else:
+            thermal_kT = kT
+
         nvt_method = hoomd.md.methods.ConstantVolume(
             filter=self._get_integrate_group(),
             thermostat=thermostat(kT=kT, tau=tau),
         )
         self.set_integrator(method=nvt_method, dt=dt)
-        self.state.thermalize_particle_momenta(filter=hoomd.filter.All(), kT=kT)
+        self.state.thermalize_particle_momenta(filter=hoomd.filter.All(), kT=thermal_kT)
 
         if self.energies == []:
             self.run(0)
@@ -263,19 +273,14 @@ class HoomdSimulation(hoomd.simulation.Simulation):
         )
         self.operations.updaters.append(box_resizer)
 
-        # HOOMD resizes the box about the origin. Track the box lengths so the
-        # frame offset can be adjusted, keeping the compound's box corner fixed
-        # when positions are synced back after the resize (see _update_positions).
-        L_before = np.asarray(self.state.box.L)
-
         if self.energies == []:
             self.run(0)
             self._store_current_energies()
 
         self.run(n_steps)
         self.operations.updaters.remove(box_resizer)
-        L_after = np.asarray(self.state.box.L)
-        self._frame_offset = self._frame_offset + (L_after - L_before) / 2
+        # HOOMD resizes about the origin, so the offset must be re-derived.
+        self._frame_offset = self._frame_offset_for(np.asarray(self.state.box.L))
         self._store_current_energies()
         self.operations.integrator = None
         self._update_positions()
@@ -430,7 +435,7 @@ class HoomdSimulation(hoomd.simulation.Simulation):
         integration method (e.g., using ForcesHandler).
         """
         if not self.energies:
-            print(f"No energies currently stored in {self}")
+            logger.info(f"No energies currently stored in {self}")
             return None
         returnDict = {}
         n_frames = len(self.energies)
@@ -475,8 +480,8 @@ class HoomdSimulation(hoomd.simulation.Simulation):
             "r_cut": self.r_cut,
         }
 
-    def _to_hoomd_snap_forces(self):
-        """Convert compound to HOOMD snapshot and forces."""
+    def _resolve_compound_box(self):
+        """Settle self.compound.box from the explicit box, or a bounding box."""
         if self.box is not None:
             # Explicit box (e.g. a constraint's orthorhombic box_lengths) wins,
             # so the periodic cell is stable across repeated MC/MD rounds.
@@ -485,6 +490,16 @@ class HoomdSimulation(hoomd.simulation.Simulation):
             )
         elif not self.compound.box:
             self.compound.box = self.compound.get_boundingbox(pad_box=self.box_buffer)
+
+    def _frame_offset_for(self, box_lengths):
+        """Translation from HOOMD's frame back to the compound's, for a box."""
+        return np.where(self._centered, 0.0, np.asarray(box_lengths, dtype=float) / 2.0)
+
+    def _to_hoomd_snap_forces(self):
+        """Convert compound to HOOMD snapshot and forces."""
+        assert self.compound.box is not None, (
+            "box must be resolved before building the snapshot"
+        )
 
         from mbuild.utils.simulation.path_forces import (
             PathForcefield,
@@ -503,7 +518,7 @@ class HoomdSimulation(hoomd.simulation.Simulation):
                 if isinstance(self.forcefield, PathForcefield)
                 else PathForcefield()
             )
-            snap, _ = gmso.external.to_gsd_snapshot(top=top)
+            snap, _ = gmso.external.to_gsd_snapshot(top=top, shift_coords=False)
             forces = generate_ff_from_path(
                 snap,
                 radius=pff.radius,
@@ -521,15 +536,20 @@ class HoomdSimulation(hoomd.simulation.Simulation):
                 ignore_params=["dihedral", "improper"],
             )
             forces, _ = gmso.external.to_hoomd_forcefield(top, r_cut=self.r_cut)
-            snap, _ = gmso.external.to_gsd_snapshot(top=top)
+            snap, _ = gmso.external.to_gsd_snapshot(top=top, shift_coords=False)
             forces = list(set().union(*forces.values()))
         else:  # No GMSO/Foyer FF given, use the UFF-generated parameters
             from mbuild.utils.simulation.uff import assign_uff_types, uff_forces
 
             _, order_map = assign_uff_types(top, self.compound)
-            snap, _ = gmso.external.to_gsd_snapshot(top=top)
+            snap, _ = gmso.external.to_gsd_snapshot(top=top, shift_coords=False)
             forces = uff_forces(top, snap, order_map, r_cut=self.r_cut)
 
+        # gmso is told not to shift, so apply the translation into HOOMD's
+        # frame here, where the offset is known rather than inferred.
+        snap.particles.position = (
+            np.asarray(snap.particles.position) - self._frame_offset
+        ).astype(np.float32)
         _wrap_into_box(snap)
         return snap, forces
 
@@ -1121,6 +1141,44 @@ def _wrap_into_box(snap):
         (pos[:, periodic] + L[periodic] / 2.0) / L[periodic]
     )
     snap.particles.position = pos.astype(np.float32)
+
+
+def _normalize_to_box_convention(xyz, box_lengths):
+    """Wrap coordinates into whichever box convention the compound already uses.
+
+    Coordinates are written either centered on the origin, spanning
+    ``[-L/2, L/2)``, or from a corner, spanning ``[0, L)``. ``gmso``'s
+    ``coord_shift`` translates a system by ``L/2`` if any single coordinate
+    falls outside the centered range, so it must be handed coordinates that
+    satisfy one convention exactly.
+
+    Parameters
+    ----------
+    xyz : np.ndarray, shape (N, 3)
+        Compound coordinates.
+    box_lengths : array-like, shape (3,)
+        Box edge lengths.
+
+    Returns
+    -------
+    xyz : np.ndarray, shape (N, 3)
+        Coordinates wrapped into the compound's own convention.
+    centered : np.ndarray of bool, shape (3,)
+        True on axes written about the origin, False on axes written from 0.
+    """
+    xyz = np.array(xyz, dtype=float, copy=True)
+    L = np.asarray(box_lengths, dtype=float)
+    outside_centered = ((xyz < -L / 2.0) | (xyz >= L / 2.0)).sum(axis=0)
+    outside_corner = ((xyz < 0.0) | (xyz >= L)).sum(axis=0)
+    centered = outside_centered <= outside_corner
+    mins = np.where(centered, -L / 2.0, 0.0)
+    # A span wider than the box has no valid periodic image.
+    span = xyz.max(axis=0) - xyz.min(axis=0)
+    wrappable = (L > 0) & (span <= L)
+    xyz[:, wrappable] = mins[wrappable] + np.mod(
+        xyz[:, wrappable] - mins[wrappable], L[wrappable]
+    )
+    return xyz, centered
 
 
 def _sync_back(compound, is_path, original):
