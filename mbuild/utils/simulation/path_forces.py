@@ -208,7 +208,7 @@ def build_path_ff(
     forces = []
     ptypes = list(snap.particles.types)
 
-    nlist = hoomd.md.nlist.Cell(buffer=0.2, exclusions=("bond",))
+    nlist = hoomd.md.nlist.Cell(buffer=0.2, exclusions=("bond", "1-3", "1-4"))
     lj = hoomd.md.pair.LJ(
         nlist=nlist, default_r_cut=r_cut * max(radius.values()), mode="shift"
     )

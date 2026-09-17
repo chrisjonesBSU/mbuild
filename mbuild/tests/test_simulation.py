@@ -673,6 +673,65 @@ class TestHoomdSimulation(BaseTest):
         # A stale offset would shift these by ~dL/2 (1 nm here) and go negative.
         assert np.all(xyz >= -1e-4)
         assert np.all(xyz <= L_final + 1e-4)
+        assert np.allclose(sim._frame_offset, L_final / 2, atol=1e-4)
+
+    @pytest.mark.skipif(not has_hoomd, reason="hoomd is not installed")
+    @pytest.mark.parametrize(("start_L", "target_L"), [(3.0, 5.0), (5.0, 3.5)])
+    def test_box_update_centered_system_stays_centered(self, start_L, target_L):
+        """A centered compound keeps its frame through a resize, either way."""
+        methane = mb.load("C", smiles=True)
+        methane.name = "Methane"
+        # Keep the cluster off the faces so normalization has nothing to wrap.
+        box = mb.fill_box(compound=[methane], n_compounds=[8], box=[2, 2, 2])
+        box.xyz = box.xyz - box.xyz.mean(axis=0)  # centered convention
+        box.box = mb.Box(lengths=[start_L] * 3)
+
+        sim = HoomdSimulation(
+            system=box, box=[start_L] * 3, r_cut=1.0, run_on_gpu=False, kick=False
+        )
+        assert np.allclose(sim._frame_offset, 0.0)
+        com_before = sim.compound.xyz.mean(axis=0)
+
+        sim.box_update(
+            n_steps=3000,
+            kT=1.0,
+            dt=1e-4,
+            tau=1e-2,
+            target_box=hoomd.Box(target_L, target_L, target_L),
+            update_period=50,
+        )
+
+        L_final = np.asarray(sim.state.box.L)
+        xyz = sim.compound.xyz
+        assert np.allclose(sim._frame_offset, 0.0)
+        assert np.allclose(xyz.mean(axis=0), com_before, atol=1e-2)
+        assert np.all(xyz >= -L_final / 2 - 1e-4)
+        assert np.all(xyz <= L_final / 2 + 1e-4)
+
+    @pytest.mark.skipif(not has_hoomd, reason="hoomd is not installed")
+    def test_box_update_corner_system_shrinks_without_shift(self):
+        """The corner convention survives a shrink as well as a growth."""
+        methane = mb.load("C", smiles=True)
+        methane.name = "Methane"
+        box = mb.fill_box(compound=[methane], n_compounds=[8], box=[5, 5, 5])
+        sim = HoomdSimulation(system=box, r_cut=1.0, box_buffer=2, run_on_gpu=False)
+        assert np.allclose(sim._frame_offset, 2.5, atol=1e-4)
+
+        # 3.5 nm still clears HOOMD's minimum image distance for this r_cut.
+        sim.box_update(
+            n_steps=3000,
+            kT=1.0,
+            dt=1e-4,
+            tau=1e-2,
+            target_box=hoomd.Box(3.5, 3.5, 3.5),
+            update_period=50,
+        )
+
+        L_final = np.asarray(sim.state.box.L)
+        xyz = sim.compound.xyz
+        assert np.allclose(sim._frame_offset, L_final / 2, atol=1e-4)
+        assert np.all(xyz >= -1e-4)
+        assert np.all(xyz <= L_final + 1e-4)
 
     @pytest.mark.skipif(not has_hoomd, reason="hoomd is not installed")
     def test_recover_undoes_only_the_last_run(self):
