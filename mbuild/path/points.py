@@ -317,11 +317,11 @@ class AnglesSampler:
 
 
 def generate_trials(state):
-    """Use normal or uniform sampling on angles, uniform sampling on radius."""
+    """Use normal or uniform sampling on angles, isotropic trial vectors."""
     thetas = state.angles.sample(size=state.trial_batch_size).astype(np.float32)
-    r = state.rng.uniform(-0.5, 0.5, size=(state.trial_batch_size, 3)).astype(
-        np.float32
-    )
+    # Only the direction of r is used; normal sampling is isotropic, giving a
+    # uniform azimuth around the chain direction.
+    r = state.rng.normal(size=(state.trial_batch_size, 3)).astype(np.float32)
     return thetas, r
 
 
