@@ -1088,6 +1088,30 @@ class ForcesHandler:
             sim.active_forces.append(force)
             self.forcesDict[key] = force
 
+        # Tabulated potentials carry arrays rather than a scalar coefficient,
+        # so they are matched by their own classes and scaled term-wise.
+        tableDict = {
+            "angle": (hoomd.md.angle.Table, ("U", "tau")),
+            "periodic": (hoomd.md.dihedral.Table, ("U", "tau")),
+        }
+        for key, (instance, terms) in tableDict.items():
+            scalar = self.scale_forces.get(key)
+            if not scalar:
+                continue
+            try:
+                force = sim._get_force(instance)
+            except ValueError:
+                continue
+            orig_params = sim._orig_force_params.get(id(force), {})
+            for param in force.params:
+                values = dict(force.params[param])
+                for term in terms:
+                    base = orig_params.get(param, {}).get(term, values[term])
+                    values[term] = np.asarray(base) * scalar
+                force.params[param] = values
+            sim.active_forces.append(force)
+            self.forcesDict[f"{key}_table"] = force
+
 
 def _resolve_input(system):
     """Convert a Path or Compound input into an mBuild Compound.

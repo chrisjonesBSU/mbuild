@@ -1468,9 +1468,17 @@ def hard_sphere_random_walk(
     walk_finished = False
     while not walk_finished:
         batch_angles, batch_vectors = generate_trials(state)
+        pos1 = coordinates[state.count - 1]
+        pos2 = coordinates[state.count - 2]
+        if any(pbc):
+            # Stored coordinates are wrapped, and next_step measures the angle
+            # from pos2 - pos1. box_lengths is inf on aperiodic axes.
+            delta = pos2 - pos1
+            delta[pbc] -= np.round(delta[pbc] / box_lengths[pbc]) * box_lengths[pbc]
+            pos2 = pos1 + delta
         candidates = next_step(
-            pos1=coordinates[state.count - 1],
-            pos2=coordinates[state.count - 2],
+            pos1=pos1,
+            pos2=pos2,
             bond_length=bond_length,
             thetas=batch_angles,
             r_vectors=batch_vectors,
