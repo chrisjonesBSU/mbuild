@@ -3,7 +3,6 @@ import logging
 import numpy as np
 
 from mbuild.exceptions import PathConvergenceError
-from mbuild.path.constraints import CuboidConstraint, CylinderConstraint
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +42,12 @@ def get_second_point(state, existing_points, beads, check_path, next_step):
 
     """
     batch_angles, batch_vectors, _ = generate_trials(state)
-    # If this RW is using link linear, pos2 = last site of last
+    # If this RW links to an existing path, the first site of this walk is bonded
+    # to state.attach_index, so that site sets the angle reference for the second.
     # Set pos1 and pos2 before checking include compound and combining coordinates
-    if state.connectivity == "link-linear" and len(existing_points) > 1:
+    if state.connectivity == "link-linear" and state.attach_index >= 0:
         pos1 = existing_points[-1]
-        pos2 = existing_points[-2]
+        pos2 = existing_points[state.attach_index]
     else:
         pos1 = None
         pos2 = existing_points[-1]
@@ -76,12 +76,22 @@ def get_second_point(state, existing_points, beads, check_path, next_step):
     if state.bias:
         xyzs = state.bias(candidates=xyzs, coordinates=existing_points, names=beads)
 
+    if any(state.pbc):
+        xyzs = (
+            state.volume_constraint.mins
+            + np.mod(xyzs - state.volume_constraint.mins, state.box_lengths)
+        ).astype(np.float32)
+
+    excluded_indices = state.excluded_indices()
     for xyz in xyzs:
         if check_path(
             existing_points=existing_points,
             new_point=xyz,
             radius=state.radius,
             tolerance=state.tolerance,
+            pbc=state.pbc,
+            box_lengths=state.box_lengths,
+            excluded_indices=excluded_indices,
         ):
             return xyz
     return None
@@ -92,13 +102,14 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
 
     The strategy for choosing a starting point depends on ``state.initial_point``:
 
-    - **np.ndarray (3,)**: the array is used directly as the starting coordinate.
-    - **int**: treated as an index into ``existing_points``; a new point is
-      generated in a sphere around that coordinate, filtered by volume
-      constraint and bias, and checked for overlaps.
-    - **None with volume_constraint**: candidates are sampled from the volume
+    - A coordinate: the array is used directly as the starting coordinate.
+    - A site index, indicated by ``state.starting_from_site``: indexes into
+      ``existing_points``; a new point is generated in a sphere around that
+      coordinate, filtered by volume constraint and bias, and checked for
+      overlaps.
+    - None with volume_constraint: candidates are sampled from the volume
       constraint's low-density regions and checked for overlaps.
-    - **None without volume_constraint**: candidates are drawn uniformly at
+    - None without volume_constraint: candidates are drawn uniformly at
       random within the bounding box of ``existing_points`` (or a unit sphere
       around the origin if no points exist yet) and checked for overlaps.
 
@@ -124,7 +135,7 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
     next_step : callable
         Coordinate-generation function with signature
         ``next_step(pos1, pos2, bond_length, thetas, r_vectors) -> np.ndarray``.
-        Used only when ``state.initial_point`` is an int.
+        Used only when ``state.initial_point`` is a site index.
 
     Returns
     -------
@@ -134,7 +145,7 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
     Raises
     ------
     ValueError
-        If ``state.initial_point`` is an int that is out of bounds for
+        If ``state.initial_point`` is a site index that is out of bounds for
         ``existing_points``.
     PathConvergenceError
         If no valid starting point can be found within the trial batch,
@@ -149,16 +160,19 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
         existing_points = np.concat((existing_points, compound_xyz))
         beads = np.concat((beads, compound_names))
 
+    excluded_indices = state.excluded_indices()
+
     # An initial point was manually given in hard_sphere_random_walk, use that.
     # Check if this point causes any overlaps, if so, raise error.
-    if isinstance(state.initial_point, np.ndarray) and state.initial_point.shape == (
-        3,
-    ):
+    if state.initial_point is not None and not state.starting_from_site:
         if check_path(
             existing_points=existing_points,
             new_point=state.initial_point,
             radius=state.radius,
             tolerance=state.tolerance,
+            pbc=state.pbc,
+            box_lengths=state.box_lengths,
+            excluded_indices=excluded_indices,
         ):
             return state.initial_point
         raise PathConvergenceError(
@@ -167,7 +181,7 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
         )
 
     # Passing in an index to specify an initial point from already defined set of coordinates
-    elif isinstance(state.initial_point, int):
+    elif state.starting_from_site:
         if state.initial_point >= n_walk_points:
             raise ValueError(
                 f"You passed a starting index of {state.initial_point} "
@@ -180,7 +194,7 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
         xyzs = next_step(
             pos1=None,  # will generate sphere of points around pos2
             pos2=starting_xyz,
-            bond_length=state.bond_length,
+            bond_length=state.initial_point_distance,
             thetas=batch_angles,
             r_vectors=batch_vectors,
             pos3=None,
@@ -193,36 +207,28 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
             xyzs = xyzs[is_inside_mask]
 
         if state.bias:
-            xyzs = state.bias(candidates=xyzs, coordinates=existing_points, names=beads)
-
-        # Set up PBC info from volume constraints
-        if isinstance(state.volume_constraint, CuboidConstraint):
-            pbc = state.volume_constraint.pbc
-            box_lengths = state.volume_constraint.box_lengths.astype(np.float32)
-        elif isinstance(state.volume_constraint, CylinderConstraint):
-            pbc = (False, False, state.volume_constraint.periodic_height)
-            box_lengths = np.array(
-                [
-                    state.volume_constraint.radius * 2,
-                    state.volume_constraint.radius * 2,
-                    state.volume_constraint.height,
-                ]
-            ).astype(np.float32)
-        else:
-            pbc = (None, None, None)
-            box_lengths = (None, None, None)
+            bias_coords = np.concat((existing_points, starting_xyz[None, :]))
+            bias_names = np.concat(
+                (beads, beads[state.initial_point : state.initial_point + 1])
+            )
+            xyzs = state.bias(
+                candidates=xyzs, coordinates=bias_coords, names=bias_names
+            )
 
         for i in range(len(xyzs)):
             xyz = xyzs[i]
-            if any(pbc):
+            if any(state.pbc):
                 xyz = state.volume_constraint.mins + np.mod(
-                    xyz - state.volume_constraint.mins, box_lengths
+                    xyz - state.volume_constraint.mins, state.box_lengths
                 )
             if check_path(  # check for overlaps
                 existing_points=existing_points,
                 new_point=xyz,
                 radius=state.radius,
                 tolerance=state.tolerance,
+                pbc=state.pbc,
+                box_lengths=state.box_lengths,
+                excluded_indices=excluded_indices,
             ):
                 return xyz
         raise PathConvergenceError(
@@ -234,7 +240,10 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
     # TODO: Use find_low_density_point here instead?
     elif state.volume_constraint:
         xyzs = state.volume_constraint.sample_candidates(
-            points=existing_points, n_candidates=300, buffer=state.radius + 0.1
+            points=existing_points,
+            n_candidates=300,
+            buffer=state.radius + 0.1,
+            rng=state.rng,
         )
         for xyz in xyzs:
             if check_path(
@@ -242,6 +251,9 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
                 new_point=xyz,
                 radius=state.radius,
                 tolerance=state.tolerance,
+                pbc=state.pbc,
+                box_lengths=state.box_lengths,
+                excluded_indices=excluded_indices,
             ):
                 return xyz
         raise PathConvergenceError(
@@ -264,6 +276,9 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
                 new_point=xyz,
                 radius=state.radius,
                 tolerance=state.tolerance,
+                pbc=state.pbc,
+                box_lengths=state.box_lengths,
+                excluded_indices=excluded_indices,
             ):
                 return xyz
         raise PathConvergenceError(
@@ -292,27 +307,24 @@ class AnglesSampler:
       the grid ``values``. The grid need not be sorted.
     """
 
-    def __init__(self, distributionStr, kwargs, seed):
-        # Create a generator object for high-quality random numbers [9]
-        self.rng = np.random.default_rng(seed)
-        self.distribution = distributionStr.lower()
-        if self.distribution == "uniform":
-            self.sampler = self.rng.uniform
+    def __init__(self, distributionStr, kwargs, rng=None):
+        self.rng = rng if rng is not None else np.random.default_rng()
+        distribution = distributionStr.lower()
+        if distribution == "uniform":
             assert "low" in kwargs
             assert "high" in kwargs
-        elif self.distribution == "normal":
-            self.sampler = self.rng.normal
+        elif distribution == "normal":
             assert "loc" in kwargs
             assert "scale" in kwargs
-        elif self.distribution == "choice":
-            self.sampler = self.rng.choice
+        elif distribution == "choice":
             assert "a" in kwargs  # p is not required
-        elif self.distribution == "tabulated":
+        elif distribution == "tabulated":
             self._init_tabulated(kwargs)
         else:
             raise NotImplementedError(
                 f"Sample Distribution {distributionStr} not supported."
             )
+        self.distribution = distribution
         self.kwargs = kwargs
 
     def _init_tabulated(self, kwargs):
@@ -358,17 +370,17 @@ class AnglesSampler:
                 )
                 out = self._values[idx]
             return out if size is not None else out[0]
-        return self.sampler(size=size, **self.kwargs)
+        # Resolve against self.rng at call time so the rng can be swapped in.
+        return getattr(self.rng, self.distribution)(size=size, **self.kwargs)
 
 
 def generate_trials(state):
     """Sample a batch of trial bond angles, random vectors, and (optionally) dihedrals.
 
-    Angles are sampled from ``state.angles`` (normal/uniform/choice) and the
-    random vectors set the azimuth when no dihedral control is used. If a
-    dihedral sampler was passed to ``hard_sphere_random_walk`` (``state.dihedrals``
-    is set), a batch of dihedral angles ``phis`` is also sampled; otherwise
-    ``phis`` is ``None`` and only vectors and angles are generated.
+    Angles are sampled from ``state.angles`` and the random vectors set the
+    azimuth when no dihedral control is used. If a dihedral sampler was passed
+    to ``hard_sphere_random_walk`` (``state.dihedrals`` is set), a batch of
+    dihedral angles ``phis`` is also sampled; otherwise ``phis`` is ``None``.
 
     Returns
     -------
@@ -377,9 +389,9 @@ def generate_trials(state):
     phis : np.ndarray (batch,) or None
     """
     thetas = state.angles.sample(size=state.trial_batch_size).astype(np.float32)
-    r = state.rng.uniform(-0.5, 0.5, size=(state.trial_batch_size, 3)).astype(
-        np.float32
-    )
+    # Only the direction of r is used; normal sampling is isotropic, giving a
+    # uniform azimuth around the chain direction.
+    r = state.rng.normal(size=(state.trial_batch_size, 3)).astype(np.float32)
     phis = None
     if getattr(state, "dihedrals", None) is not None:
         phis = state.dihedrals.sample(size=state.trial_batch_size).astype(np.float32)

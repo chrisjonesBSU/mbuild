@@ -3,18 +3,18 @@
 import logging
 import math
 import time
-from functools import partial
+from itertools import combinations_with_replacement
 
 import networkx as nx
 import numpy as np
 from scipy.interpolate import interp1d
 
-from mbuild import Compound
+from mbuild import Box, Compound
 from mbuild.exceptions import PathConvergenceError
 from mbuild.path.constraints import CuboidConstraint, CylinderConstraint
-from mbuild.path.namers import BeadNamer
+from mbuild.path.namers import BEAD_NAME_DTYPE, BeadNamer
 from mbuild.path.path_utils import (
-    calculate_sq_distances,
+    check_angle_range,
     check_path,
     random_coordinate,
 )
@@ -25,6 +25,7 @@ from mbuild.path.points import (
     get_second_point,
 )
 from mbuild.path.termination import NumSites, Termination, Terminator
+from mbuild.utils.io import import_
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +45,8 @@ class Path:
         multiple `Path` instances to build heterogeneous systems.
         If an array of bead names is passed, it should be the same length
         as ``coordinates`` or the number of nodes in ``bond_graph``
-        The array will be cast to a "U10" data type, so bead names
-        should not exceed 10 characters.
+        The array will be cast to BEAD_NAME_DTYPE, so bead names
+        should not exceed MAX_BEAD_NAME_LENGTH characters.
 
     """
 
@@ -67,14 +68,14 @@ class Path:
             )
             self.bond_graph = bond_graph
             self.coordinates = coordinates
-            self.beads = bead_name.astype("U10")
+            self.beads = bead_name.astype(BEAD_NAME_DTYPE)
         # Passing in an array of coordinates, bond graph, and single bead name
         elif coordinates is not None and bond_graph is not None:
             assert len(coordinates) == len(bond_graph)
             self.bond_graph = bond_graph
             self.coordinates = coordinates
             self.beads = np.array(
-                [str(bead_name) for _ in range(len(coordinates))], dtype="U10"
+                [str(bead_name) for _ in range(len(coordinates))], dtype=BEAD_NAME_DTYPE
             )
         # Only passing in a bond graph with data defined for xyz and name
         # TODO: Cast to fp32 here?
@@ -85,24 +86,28 @@ class Path:
             )
             self.beads = np.array(
                 [node.get("name") for node in bond_graph.nodes(data=True)]
-            ).astype("U10")
+            ).astype(BEAD_NAME_DTYPE)
         # Only passing in coordinates, need to create bond graph object.
         elif coordinates is not None and bond_graph is None:
             self.coordinates = np.asarray(coordinates)
             self.bond_graph = nx.Graph()
             # Only passed a single string for bead name, create array
             if isinstance(bead_name, str):
-                self.beads = np.array([bead_name for _ in coordinates], dtype="U10")
-            # Passed array of bead names, cast to U10 dtype
+                self.beads = np.array(
+                    [bead_name for _ in coordinates], dtype=BEAD_NAME_DTYPE
+                )
+            # Passed array of bead names, cast to the bead name dtype
             elif isinstance(bead_name, np.ndarray):
-                self.beads = bead_name.astype("U10")
+                self.beads = bead_name.astype(BEAD_NAME_DTYPE)
+            elif isinstance(bead_name, list):
+                self.beads = np.array(bead_name, dtype=BEAD_NAME_DTYPE)
             for idx in range(len((self.coordinates))):
                 self.bond_graph.add_node(idx)
         # Nothing is defined, create empty place holders for coords, bond graph and bead names
         else:
             self.coordinates = np.array([], dtype=np.float32)
             self.bond_graph = nx.Graph()
-            self.beads = np.array([], dtype="U10")
+            self.beads = np.array([], dtype=BEAD_NAME_DTYPE)
 
     def __eq__(self, other):
         return (
@@ -114,17 +119,33 @@ class Path:
     def __add__(self, other):
         coordinates = np.concat((self.coordinates, other.coordinates))
         beads = np.concat((self.beads, other.beads))
-        bond_graph = nx.compose(
-            self.bond_graph, other.bond_graph
-        )  # TODO: Don't overwrite nodes in bg
+        offset = len(self)
+        mapping = {node: node + offset for node in range(len(other))}
+        shifted_graph = nx.relabel_nodes(other.bond_graph, mapping)
+        bond_graph = nx.compose(self.bond_graph, shifted_graph)
         return Path(coordinates, bond_graph, beads)
+
+    def __len__(self):
+        if hasattr(self, "coordinates"):
+            return len(self.coordinates)
+        return 0
+
+    def add_path(self, otherPath, other_coordinates=None):
+        """Add one path to current path."""
+        if other_coordinates is None:
+            other_coordinates = otherPath.coordinates
+        initial_n_nodes = len(self)
+        self.append_coordinates(other_coordinates, otherPath.beads)
+        for site1, site2 in otherPath.bond_graph.edges():
+            self.bond_graph.add_edge(site1 + initial_n_nodes, site2 + initial_n_nodes)
 
     @classmethod
     def from_compound(cls, compound):
         coordinates = compound.xyz
+        names = [particle.name for particle in compound.particles()]
 
         # Create the path with coordinates and bond graph
-        path = cls(coordinates=coordinates, bead_name=compound.name)
+        path = cls(coordinates=coordinates, bead_name=names)
         path.bond_graph = nx.Graph()
 
         # Ensure all nodes have xyz and name attributes
@@ -161,7 +182,7 @@ class Path:
             points = np.array([points])  # make a 2d array
         # Create sequence of bead names
         if isinstance(bead_names, str):
-            bead_names = np.array([bead_names] * len(points), dtype="U10")
+            bead_names = np.array([bead_names] * len(points), dtype=BEAD_NAME_DTYPE)
 
         if self.coordinates.size == 0:
             self.coordinates = points
@@ -177,13 +198,13 @@ class Path:
         """Create new coordinate and bead name place holders for setting values."""
         if self.coordinates.size == 0:
             self.coordinates = np.zeros((N, 3), dtype=np.float32)
-            self.beads = np.zeros(N, dtype="U10")  # Place holder is empty str
+            self.beads = np.zeros(N, dtype=BEAD_NAME_DTYPE)  # Place holder is empty str
             return
         # Update coordinates array
         zeros = np.zeros((N, 3), dtype=self.coordinates.dtype)
         self.coordinates = np.concatenate([self.coordinates, zeros])
         # Update bead names array
-        empty = np.zeros(N, dtype="U10")
+        empty = np.zeros(N, dtype=BEAD_NAME_DTYPE)
         self.beads = np.concatenate([self.beads, empty])
 
     def _extend_bond_graph(self):
@@ -278,6 +299,19 @@ class Path:
             length=float(bond_length),
         )
 
+    def remove_nodes(self, nodes_to_remove):
+        """Remove coordinates, bead_names, and update bond_graph concurrently."""
+        mask = np.ones(len(self.coordinates), dtype=bool)
+        mask[list(nodes_to_remove)] = False
+        self.bond_graph.remove_nodes_from(nodes_to_remove)
+        G = self.bond_graph
+        self.bond_graph = nx.convert_node_labels_to_integers(
+            G, first_label=0
+        )  # renumber 0 to n
+
+        self.coordinates = self.coordinates[mask]
+        self.beads = self.beads[mask]
+
     def find_neighbors(
         self, u, min_bond_length, max_bond_length, excluded_bond_depth=0
     ):
@@ -295,11 +329,13 @@ class Path:
         """Convert a path and its bond graph to an mBuild Compound."""
         compound = Compound()
         compounds = []
-        # TODO: Should name be pulled from self.beads[noe_id] as well?
         # TODO: Should we have a mass parameter? Could be useful for density termination
-        for node_id, attrs in self.bond_graph.nodes(data=True):
+        # TODO: Could also add an is_atomistic flag and validate the bead names here before sending to Compound.
+        for node_id in self.bond_graph.nodes:
             compounds.append(
-                Compound(name=attrs["name"], pos=self.coordinates[node_id], mass=1.0)
+                Compound(
+                    name=self.beads[node_id], pos=self.coordinates[node_id], mass=1.0
+                )
             )
         compound.add(compounds)
         for edge1, edge2 in self.bond_graph.edges():
@@ -307,6 +343,82 @@ class Path:
                 compounds[edge1], compounds[edge2], bond_order=1.0
             )
         return compound
+
+    def to_cgsmiles_graph(self, fragname_map=None):
+        """Convert this path's bond graph to a CGsmiles-compatible meta graph.
+
+        Parameters
+        ----------
+        fragname_map : dict[str, str], optional
+            Mapping of bead names to CGsmiles fragment names. Bead names not
+            present in the map are used as fragment names directly. Useful
+            when path bead names differ from the fragment
+            names used in the CGsmiles fragment string.
+
+        Returns
+        -------
+        networkx.Graph
+            Meta graph usable with ``cgsmiles.MoleculeResolver``.
+
+        See ``mbuild.coarse_graining.to_cgsmiles_graph``.
+        """
+        from mbuild.coarse_graining import to_cgsmiles_graph
+
+        return to_cgsmiles_graph(self, fragname_map=fragname_map)
+
+    def to_cgsmiles(self, fragname_map=None):
+        """Write the coarse-grained level of this Path as a CGsmiles string.
+
+        The returned string describes the bead sequence and connectivity
+        (including branches and rings) at the coarse-grained level.
+        Append fragment definitions (e.g. ``"{#A=[>]CC[<]}"``)
+        to obtain a fully resolvable CGsmiles string.
+
+        Parameters
+        ----------
+        fragname_map : dict[str, str], optional
+            Mapping of bead names to CGsmiles fragment names. Bead names not
+            present in the map are used as fragment names directly. Useful
+            when path bead names differ from the fragment
+            names used in the CGsmiles fragment string.
+
+        Returns
+        -------
+        str
+            The CGsmiles graph string, e.g. ``"{[#A][#A]([#B][#B])[#A]}"``.
+            Paths holding multiple disconnected molecules (e.g. a box of
+            chains) are written as ``.``-separated segments, which CGsmiles
+            reads as zero-order (non-bonded) connections.
+
+        See ``mbuild.coarse_graining.to_cgsmiles``.
+        """
+        from mbuild.coarse_graining import to_cgsmiles
+
+        return to_cgsmiles(self, fragname_map=fragname_map)
+
+    def backmap(self, fragments=None, **kwargs):
+        """Backmap the path to an atomistic Compound using CGsmiles.
+
+        Resolves each bead to molecular detail and returns an atomistic
+        ``mbuild.Compound`` that retains the path's conformation. Works
+        for any bond graph topology, including branch points. Fragments
+        are defined by CGsmiles fragment strings (SMILES with bonding
+        descriptors), by tagged mBuild compounds passed via
+        ``templates``, or a mix of both.
+
+        See ``mbuild.coarse_graining.backmap`` for parameters.
+
+        Example
+        -------
+        >>> path = straight_line(spacing=0.25, N=10, bead_name="PEO")
+        >>> compound = path.backmap("{#PEO=[>]COC[<]}")
+        >>> # or, defining the fragment with a tagged compound instead
+        >>> template = mb.load("C{>}O{ }C{<}", smiles=True)  # doctest: +SKIP
+        >>> compound = path.backmap(templates={"PEO": template})  # doctest: +SKIP
+        """
+        from mbuild.coarse_graining import backmap
+
+        return backmap(self, fragments, **kwargs)
 
     def to_mol2(self):
         """Convert a path to a .mol2 file."""
@@ -340,28 +452,209 @@ class Path:
 
         return visualize_path(self, radius, hide_periodic_bonds)
 
-    def relax(self, bead_radius, bond_length=None, steps=1000, seed=1, nthreads=1):
-        """Perform a dpd simulation to relax the current path.
+    def relax(
+        self,
+        bead_radius,
+        btype="harmonic",
+        bond_length=None,
+        angles_sampler=None,
+        steps=1000,
+        seed=1,
+        run_on_gpu=False,
+    ):
+        """Relax the path with a coarse Kremer-Grest forcefield.
 
-        Runs a short energy minimization simulation in OpenMM.
+        Builds a WCA + FENE forcefield from the given parameters and runs a
+        capped-displacement warm-up followed by FIRE minimization in HOOMD.
+        Relaxed coordinates are synced back onto the path.
 
         Parameters
         ----------
-        bead_radius : float
-            Bead size set in the simulation.
-        bond_length : float, optional
-            Bond length used for all bonds.
+        bead_radius : float or dict
+            LJ or WCA bead radius (center-to-center exclusion diameter). A dict keyed
+            by bead type gives each bead type its own size.
+        bond_length : float or dict, optional
+            Target bond length. Defaults to per-bond-type means over the path.
+            A dict is keyed by an unordered bead-type pair.
+        btype : str, optional, default='harmonic'
+            Which bond type to use by default. Harmonic bonds are useful when the current
+            bond_length distribution is far from the bond_length target.
+        angles_sampler : mbuild.path.points.AnglesSampler or dict, optional
+            If given, adds a tabulated angle potential. A dict keyed by a
+            bead-type triple parameterizes angles per type.
         steps : int, optional, default 1,000
-            Number of simulation steps to run.
+            Number of FIRE minimization steps.
         seed : int, optional, default 1
-            Random seed for integrator.
-        nthreads : int, optional, default 1
-            Number of threads to use during OpenMM simulation.
+            Random seed for the simulation.
+        run_on_gpu : bool, default False
+            If True, HOOMD will attempt to run on the GPU if the user has
+            a GPU compatible version of HOOMD installed, and a compatible
+            GPU available. If one isn't found, it will revert to the CPU.
+            if False, HOOMD will run on the CPU.
         """
-        from mbuild.simulation import energy_minimize_path
+        import mbuild.simulation
+        from mbuild.utils.simulation.path_forces import (
+            PathForcefield,
+            _mean_bond_length,
+        )
 
-        energy_minimize_path(self, bead_radius, bond_length, steps, seed, nthreads)
-        return
+        # Scalar length scale for the displacement cap, even if per-type lengths
+        # were given.
+        if isinstance(bond_length, (int, float)):
+            bond_eff = bond_length
+        else:
+            bond_eff = _mean_bond_length(self)
+        forcefield = PathForcefield(
+            radius=bead_radius,
+            bond_length=bond_length,
+            btype=btype,
+            angles=angles_sampler,
+        )
+        sim = mbuild.simulation.HoomdSimulation(
+            self, forcefield=forcefield, seed=seed, run_on_gpu=run_on_gpu
+        )
+        sim.cap_displacement(n_steps=500, dt=1, max_displacement=0.01 * bond_eff)
+        sim.fire(n_steps=steps)
+
+    def print_bond_lengths(self, box=None):
+        """Compute and return info about path bonds.
+
+        Parameters
+        ----------
+        box : list, optional
+            list of [Lx, Ly, Lz] to use for checking for periodic bonds. Assume centered at (0,0,0)
+
+        Returns
+        -------
+        bonds : dict
+            Dictionary mapping (i, center, k) tuples to their angles in nm.
+        bonds_typesDict : dict
+            Dictionary mapping sorted bead-type tuples to lists of bonds.
+        """
+        positions = self.coordinates
+        bond_lengths = {}
+        beads = set(self.beads)
+        bond_types = list(combinations_with_replacement(beads, 2))
+        bond_typesDict = {
+            tuple(sorted((str(b1), str(b2)))): [] for b1, b2 in bond_types
+        }
+
+        for i, j in self.bond_graph.edges():
+            delta = positions[j] - positions[i]
+            if isinstance(box, CuboidConstraint):
+                box_arr = box.box_lengths
+                delta -= np.round(delta / box_arr) * box_arr
+            elif isinstance(box, Box):
+                box_arr = box.lengths
+                delta -= np.round(delta / box_arr) * box_arr
+            elif isinstance(box, list):
+                box_arr = np.array(box)
+                delta -= np.round(delta / box_arr) * box_arr
+            bl = np.linalg.norm(delta)
+            bond_lengths[(i, j)] = bl
+            bond_name = tuple(sorted((str(self.beads[i]), str(self.beads[j]))))
+            bond_typesDict[bond_name].append(bl)
+
+        # Summary stats
+        print(f"Min bond length: {min(bond_lengths.values()):.4f}")
+        print(f"Max bond length: {max(bond_lengths.values()):.4f}")
+        print(f"Mean bond length: {np.mean(list(bond_lengths.values())):.4f}")
+        for key in bond_typesDict:
+            if not len(bond_typesDict[key]):
+                continue
+            print(
+                f"{key}: Max={max(bond_typesDict[key]):.2f}, Min={min(bond_typesDict[key]):.2f}"
+            )
+
+        return bond_lengths, bond_typesDict
+
+    def print_angle_lengths(self, box=None):
+        """Compute and return info about path angles.
+
+        Parameters
+        ----------
+        box : array-like of shape (3,), optional
+            Box dimensions [Lx, Ly, Lz]. If None, no periodic wrapping is applied.
+
+        Returns
+        -------
+        angles : dict
+            Dictionary mapping (i, center, k) tuples to their angles in degrees.
+        angle_typesDict : dict
+            Dictionary mapping sorted bead-type tuples to lists of angles.
+        """
+        from itertools import combinations, combinations_with_replacement
+
+        positions = self.coordinates
+        angles = {}
+        beads = set(self.beads)
+
+        # Build angle type keys: (outer, center, outer) with outer pair sorted
+        angle_types = set()
+        for center_bead in beads:
+            for b1, b2 in combinations_with_replacement(beads, 2):
+                angle_types.add((str(b1), str(center_bead), str(b2)))
+        angle_typesDict = {key: [] for key in angle_types}
+
+        for center_node in self.bond_graph.nodes():
+            neighbors = list(self.bond_graph.neighbors(center_node))
+            if len(neighbors) < 2:
+                continue
+
+            for i_node, k_node in combinations(neighbors, 2):
+                # Vector from center to i
+                delta_i = positions[i_node] - positions[center_node]
+                if box is not None:
+                    box_arr = np.array(box)
+                    delta_i -= np.round(delta_i / box_arr) * box_arr
+
+                # Vector from center to k
+                delta_k = positions[k_node] - positions[center_node]
+                if box is not None:
+                    delta_k -= np.round(delta_k / box_arr) * box_arr
+
+                # Compute angle via dot product
+                cos_angle = np.dot(delta_i, delta_k) / (
+                    np.linalg.norm(delta_i) * np.linalg.norm(delta_k)
+                )
+                cos_angle = np.clip(cos_angle, -1.0, 1.0)
+                angle_deg = np.degrees(np.arccos(cos_angle))
+
+                angles[(i_node, center_node, k_node)] = angle_deg
+
+                # Categorize by type (sort outer beads for consistency)
+                outer_beads = tuple(
+                    sorted((str(self.beads[i_node]), str(self.beads[k_node])))
+                )
+                center_bead = str(self.beads[center_node])
+                angle_key = (outer_beads[0], center_bead, outer_beads[1])
+                angle_typesDict[angle_key].append(angle_deg)
+
+        # Summary stats
+        print(f"Min angle: {min(angles.values()):.2f}°")
+        print(f"Max angle: {max(angles.values()):.2f}°")
+        print(f"Mean angle: {np.mean(list(angles.values())):.2f}°")
+        for key in angle_typesDict:
+            if not len(angle_typesDict[key]):
+                continue
+            print(
+                f"{key}: Max={max(angle_typesDict[key]):.2f}°, Min={min(angle_typesDict[key]):.2f}°, Mean={np.mean(angle_typesDict[key]):.2f}°"
+            )
+
+        return angles, angle_typesDict
+
+    def freud_rdf(self, box=None, bins=50, r_max=1):
+        freud = import_("freud")
+        if box is None:
+            box = np.array([np.inf, np.inf, np.inf, 0, 0, 0])  # infinite box
+        elif isinstance(box, Box):
+            box = np.array([*box.lengths, 0, 0, 0])
+        elif len(box) == 3:
+            box = np.array([*box, 0, 0, 0])  # assume orthorhombic
+
+        rdf = freud.density.RDF(bins=bins, r_max=r_max)
+        rdf.compute(system=(box, self.coordinates))
+        return rdf
 
 
 def lamellar(
@@ -369,7 +662,7 @@ def lamellar(
     num_layers=1,
     layer_separation=None,
     layer_length=None,
-    bond_length=None,
+    spacing=None,
     initial_point=(0, 0, 0),
     num_stacks=1,
     stack_separation=None,
@@ -388,7 +681,7 @@ def lamellar(
         The distance between any two layers.
     layer_length : float (nm), required
         The distance of a lamellar layer before curving to the next.
-    bond_length : float (nm), required
+    spacing : float (nm), required
         The distance between two adjacent sites in the path.
     initial_point : nd.array (1,3), default (0,0,0)
         The coordinate of the first site of the lamellar path.
@@ -408,7 +701,7 @@ def lamellar(
     initial_point = np.asarray(initial_point)
 
     # Coordinates in the y-direction (layer-length) of the lamellar layer
-    layer_spacing = np.arange(0, layer_length, bond_length)
+    layer_spacing = np.arange(0, layer_length, spacing)
     if not left_to_right:
         layer_spacing *= -1
     layer_spacing += initial_point[1]
@@ -416,7 +709,7 @@ def lamellar(
     # Info needed for generating coords of the arc curves between layers
     r = layer_separation / 2
     arc_length = r * np.pi
-    arc_num_points = math.floor(arc_length / bond_length)
+    arc_num_points = math.floor(arc_length / spacing)
     arc_angle = np.pi / (arc_num_points + 1)
     arc_angles = np.linspace(arc_angle, np.pi, arc_num_points, endpoint=False)
 
@@ -462,7 +755,7 @@ def lamellar(
         first_stack_coordinates = np.copy(np.array(coordinates))
         r = stack_separation / 2
         arc_length = r * np.pi
-        arc_num_points = math.floor(arc_length / bond_length)
+        arc_num_points = math.floor(arc_length / spacing)
         arc_angle = np.pi / (arc_num_points + 1)
         arc_angles = np.linspace(arc_angle, np.pi, arc_num_points, endpoint=False)
 
@@ -510,7 +803,9 @@ def lamellar(
     start_index = len(path.coordinates)
     stop_index = start_index + len(coordinates)
     namer = BeadNamer.coerce(bead_name)
-    names = np.array([next(namer) for _ in range(len(coordinates))], dtype="U10")
+    names = np.array(
+        [next(namer) for _ in range(len(coordinates))], dtype=BEAD_NAME_DTYPE
+    )
     path.append_coordinates(coordinates, names)
     path._connect_edges(
         connectivity="linear", indices=np.arange(start_index, stop_index)
@@ -518,7 +813,14 @@ def lamellar(
     return path
 
 
-def straight_line(spacing, N, path=None, direction=(1, 0, 0), bead_name="_A"):
+def straight_line(
+    spacing,
+    N,
+    path=None,
+    direction=(1, 0, 0),
+    bead_name="_A",
+    initial_point=None,
+):
     """Generates a set of coordinates in a straight line along a given axis.
 
     Parameters
@@ -536,15 +838,24 @@ def straight_line(spacing, N, path=None, direction=(1, 0, 0), bead_name="_A"):
         Name(s) to assign to beads. A plain string assigns the same name to
         every bead. Pass a ``BeadNamer`` instance for heterogeneous sequences.
         See mbuild.path.namers.py
+    initial_point : array-like (1,3), optional, default None
+        If given, translates the path so that its first site sits at this
+        coordinate.
     """
     if path is None:
         path = Path()
     direction = np.asarray(direction)
     coordinates = np.array([np.zeros(3) + i * spacing * direction for i in range(N)])
+    if initial_point is not None:
+        coordinates = coordinates + (
+            np.asarray(initial_point, dtype=float) - coordinates[0]
+        )
     start_index = len(path.coordinates)
     stop_index = start_index + N
     namer = BeadNamer.coerce(bead_name)
-    names = np.array([next(namer) for _ in range(len(coordinates))], dtype="U10")
+    names = np.array(
+        [next(namer) for _ in range(len(coordinates))], dtype=BEAD_NAME_DTYPE
+    )
     path.append_coordinates(coordinates, names)
     path._connect_edges(
         connectivity="linear", indices=np.arange(start_index, stop_index)
@@ -552,7 +863,15 @@ def straight_line(spacing, N, path=None, direction=(1, 0, 0), bead_name="_A"):
     return path
 
 
-def cyclic(spacing=None, N=None, path=None, radius=None, closed=True, bead_name="_A"):
+def cyclic(
+    spacing=None,
+    N=None,
+    path=None,
+    radius=None,
+    closed=True,
+    bead_name="_A",
+    initial_point=None,
+):
     """Generates a set of coordinates evenly spaced along a circle.
 
     Parameters
@@ -572,6 +891,9 @@ def cyclic(spacing=None, N=None, path=None, radius=None, closed=True, bead_name=
         Name(s) to assign to beads. A plain string assigns the same name to
         every bead. Pass a ``BeadNamer`` instance for heterogeneous sequences.
         See mbuild.path.namers.py
+    initial_point : array-like (1,3), optional, default None
+        If given, translates the path so that its first site sits at this
+        coordinate.
 
     Notes
     -----
@@ -595,10 +917,16 @@ def cyclic(spacing=None, N=None, path=None, radius=None, closed=True, bead_name=
     coordinates = np.array(
         [(np.cos(a) * radius, np.sin(a) * radius, 0) for a in angles]
     )
+    if initial_point is not None:
+        coordinates = coordinates + (
+            np.asarray(initial_point, dtype=float) - coordinates[0]
+        )
     start_index = len(path.coordinates)
     stop_index = start_index + len(coordinates)
     namer = BeadNamer.coerce(bead_name)
-    names = np.array([next(namer) for _ in range(len(coordinates))], dtype="U10")
+    names = np.array(
+        [next(namer) for _ in range(len(coordinates))], dtype=BEAD_NAME_DTYPE
+    )
     path.append_coordinates(coordinates, names)
     if closed:
         path._connect_edges(
@@ -611,7 +939,15 @@ def cyclic(spacing=None, N=None, path=None, radius=None, closed=True, bead_name=
     return path
 
 
-def knot(spacing, N, m, path=None, closed=True, bead_name="_A"):
+def knot(
+    spacing,
+    N,
+    m,
+    path=None,
+    closed=True,
+    bead_name="_A",
+    initial_point=None,
+):
     """Generate a knot path.
 
     Parameters
@@ -632,6 +968,9 @@ def knot(spacing, N, m, path=None, closed=True, bead_name="_A"):
         Name(s) to assign to beads. A plain string assigns the same name to
         every bead. Pass a ``BeadNamer`` instance for heterogeneous sequences.
         See mbuild.path.namers.py
+    initial_point : array-like (1,3), optional, default None
+        If given, translates the path so that its first site sits at this
+        coordinate.
     """
     if path is None:
         path = Path()
@@ -678,10 +1017,16 @@ def knot(spacing, N, m, path=None, closed=True, bead_name="_A"):
     z_interp = interp1d(arc_lengths, coords_dense[:, 2])(desired_arcs)
     coordinates = np.stack((x_interp, y_interp, z_interp), axis=1)
 
+    if initial_point is not None:
+        coordinates = coordinates + (
+            np.asarray(initial_point, dtype=float) - coordinates[0]
+        )
     start_index = len(path.coordinates)
     stop_index = start_index + len(coordinates)
     namer = BeadNamer.coerce(bead_name)
-    names = np.array([next(namer) for _ in range(len(coordinates))], dtype="U10")
+    names = np.array(
+        [next(namer) for _ in range(len(coordinates))], dtype=BEAD_NAME_DTYPE
+    )
     path.append_coordinates(coordinates, names)
     if closed:
         path._connect_edges(
@@ -689,13 +1034,21 @@ def knot(spacing, N, m, path=None, closed=True, bead_name="_A"):
         )
     else:
         path._connect_edges(
-            connectivit="linear", indices=np.arange(start_index, stop_index)
+            connectivity="linear", indices=np.arange(start_index, stop_index)
         )
     return path
 
 
 def helix(
-    N, radius, rise, twist, path=None, right_handed=True, bottom_up=True, bead_name="_A"
+    N,
+    radius,
+    rise,
+    twist,
+    path=None,
+    right_handed=True,
+    bottom_up=True,
+    bead_name="_A",
+    initial_point=None,
 ):
     """Generate helical path.
 
@@ -720,6 +1073,9 @@ def helix(
         Name(s) to assign to beads. A plain string assigns the same name to
         every bead. Pass a ``BeadNamer`` instance for heterogeneous sequences.
         See mbuild.path.namers.py
+    initial_point : array-like (1,3), optional, default None
+        If given, translates the path so that its first site sits at this
+        coordinate.
     """
     if path is None:
         path = Path()
@@ -735,10 +1091,16 @@ def helix(
         z = i * rise if bottom_up else -i * rise
         coordinates[i] = (x, y, z)
 
+    if initial_point is not None:
+        coordinates = coordinates + (
+            np.asarray(initial_point, dtype=float) - coordinates[0]
+        )
     start_index = len(path.coordinates)
     stop_index = start_index + len(coordinates)
     namer = BeadNamer.coerce(bead_name)
-    names = np.array([next(namer) for _ in range(len(coordinates))], dtype="U10")
+    names = np.array(
+        [next(namer) for _ in range(len(coordinates))], dtype=BEAD_NAME_DTYPE
+    )
     path.append_coordinates(coordinates, names)
     path._connect_edges(
         connectivity="linear", indices=np.arange(start_index, stop_index)
@@ -746,7 +1108,7 @@ def helix(
     return path
 
 
-def spiral_2D(N, a, b, spacing, path=None, bead_name="_A"):
+def spiral_2D(N, a, b, spacing, path=None, bead_name="_A", initial_point=None):
     """Generate a 2D spiral path in the XY plane.
 
     Parameters
@@ -766,6 +1128,9 @@ def spiral_2D(N, a, b, spacing, path=None, bead_name="_A"):
         Name(s) to assign to beads. A plain string assigns the same name to
         every bead. Pass a ``BeadNamer`` instance for heterogeneous sequences.
         See mbuild.path.namers.py
+    initial_point : array-like (1,3), optional, default None
+        If given, translates the path so that its first site sits at this
+        coordinate.
     """
     if path is None:
         path = Path()
@@ -783,10 +1148,16 @@ def spiral_2D(N, a, b, spacing, path=None, bead_name="_A"):
         dtheta = spacing / ds_dtheta
         theta += dtheta
 
+    if initial_point is not None:
+        coordinates = coordinates + (
+            np.asarray(initial_point, dtype=float) - coordinates[0]
+        )
     start_index = len(path.coordinates)
     stop_index = start_index + len(coordinates)
     namer = BeadNamer.coerce(bead_name)
-    names = np.array([next(namer) for _ in range(len(coordinates))], dtype="U10")
+    names = np.array(
+        [next(namer) for _ in range(len(coordinates))], dtype=BEAD_NAME_DTYPE
+    )
     path.append_coordinates(coordinates, names)
     path._connect_edges(
         connectivity="linear", indices=np.arange(start_index, stop_index)
@@ -802,6 +1173,7 @@ def zigzag(
     sites_per_segment=4,
     plane="xy",
     bead_name="_A",
+    initial_point=None,
 ):
     """Generates a path following a zig-zag pattern in a given plane.
 
@@ -824,6 +1196,9 @@ def zigzag(
         Name(s) to assign to beads. A plain string assigns the same name to
         every bead. Pass a ``BeadNamer`` instance for heterogeneous sequences.
         See mbuild.path.namers.py
+    initial_point : array-like (1,3), optional, default None
+        If given, translates the path so that its first site sits at this
+        coordinate.
     """
     if N % sites_per_segment != 0:
         raise ValueError("N must be evenly divisible by sites_per_segment")
@@ -870,10 +1245,16 @@ def zigzag(
         elif plane == "yz":
             coordinates[i] = (0, x2d, y2d)
 
+    if initial_point is not None:
+        coordinates = coordinates + (
+            np.asarray(initial_point, dtype=float) - coordinates[0]
+        )
     start_index = len(path.coordinates)
     stop_index = start_index + len(coordinates)
     namer = BeadNamer.coerce(bead_name)
-    names = np.array([next(namer) for _ in range(len(coordinates))], dtype="U10")
+    names = np.array(
+        [next(namer) for _ in range(len(coordinates))], dtype=BEAD_NAME_DTYPE
+    )
     path.append_coordinates(coordinates, names)
     path._connect_edges(
         connectivity="linear", indices=np.arange(start_index, stop_index)
@@ -898,7 +1279,6 @@ def hard_sphere_random_walk(
     trial_batch_size=20,
     tolerance=1e-5,
     chunk_size=512,
-    run_on_gpu=False,
 ):
     """Generates coordinates from a self avoiding random walk using
     fixed bond lengths, hard spheres, and minimum and maximum angles
@@ -949,7 +1329,6 @@ def hard_sphere_random_walk(
         See path._connect_edges for different options.
     initial_point : array-like or int, optional
         Used as the coordinate for the first site in this random walk path. If an integer is
-        Used as the coordinate for the first site in this random walk path. If an integer is
         passed, look in coordinates of passed path object, and grab the starting coordinates from there.
     seed : int, default = 42
         Random seed
@@ -959,10 +1338,14 @@ def hard_sphere_random_walk(
         Tolerance used for rounding and checking for overlaps.
     chunk_size : int, default = 512
         Size of coordinate chunks to allocate
-    run_on_gpu : bool, default = False
-        If True and CUDA path utilities are available, use GPU-accelerated
-        implementations.
     """
+    # Create seed sequence used by multiple path classes
+    # The namer seed is separate, so that coordinates are impacted by naming methods.
+    previous_count = len(path.coordinates) if path else 0
+    seed_sequence = np.random.SeedSequence(seed + previous_count)
+    name_seed_sequence = seed_sequence.spawn(1)[0]
+    rng = np.random.default_rng(seed_sequence)
+
     # Create state object to track random walk progress
     state = RandomWalkState(
         bond_length=bond_length,
@@ -971,7 +1354,7 @@ def hard_sphere_random_walk(
         dihedrals_sampler=rw_dihedrals,
         bead_name=bead_name,
         initial_point=initial_point,
-        previous_count=len(path.coordinates) if path else 0,
+        previous_count=previous_count,
         include_compound=include_compound,
         connectivity=connectivity,
         seed=seed,
@@ -979,7 +1362,7 @@ def hard_sphere_random_walk(
         tolerance=tolerance,
         trial_batch_size=int(trial_batch_size),
         chunk_size=chunk_size,
-        run_on_gpu=bool(run_on_gpu) and _get_cuda_available(),
+        rng=rng,
     )
     if path is None:  # Create empty path
         path = Path()
@@ -1000,17 +1383,17 @@ def hard_sphere_random_walk(
     state.termination._attach_path(path, state)
 
     namer = BeadNamer.coerce(bead_name)
-
-    # Create RNG state
-    rng = np.random.default_rng(seed + len(path.coordinates))
-    state.rng = rng
+    namer._attach_rng(np.random.default_rng(name_seed_sequence))
 
     # Set up PBC info from volume constraints
+    # TODO: We can probably out-source pbc, box_lengths return to the Constraint classes
     if isinstance(volume_constraint, CuboidConstraint):
-        pbc = volume_constraint.pbc
+        pbc = np.asarray(volume_constraint.pbc, dtype=np.bool_)
         box_lengths = volume_constraint.box_lengths.astype(np.float32)
     elif isinstance(volume_constraint, CylinderConstraint):
-        pbc = (False, False, volume_constraint.periodic_height)
+        pbc = np.array(
+            [False, False, volume_constraint.periodic_height], dtype=np.bool_
+        )
         box_lengths = np.array(
             [
                 volume_constraint.radius * 2,
@@ -1019,8 +1402,10 @@ def hard_sphere_random_walk(
             ]
         ).astype(np.float32)
     else:
-        pbc = (None, None, None)
-        box_lengths = (None, None, None)
+        pbc = np.array([False, False, False], dtype=np.bool_)
+        box_lengths = np.array([np.inf, np.inf, np.inf], dtype=np.float32)
+    state.pbc = pbc
+    state.box_lengths = box_lengths
 
     # Set up bias conditions
     if bias:
@@ -1038,35 +1423,20 @@ def hard_sphere_random_walk(
             axis=0,
         )
         beads = np.concatenate(
-            (path.beads, np.zeros(chunk_size, dtype="U10")),
+            (path.beads, np.zeros(chunk_size, dtype=BEAD_NAME_DTYPE)),
             axis=0,
         )
         state.count = len(path.coordinates)  # starting index
     # The path used for this RW doesn't have previous sites
     else:
         coordinates = np.zeros((chunk_size, 3), dtype=np.float32)
-        beads = np.zeros(chunk_size, dtype="U10")
+        beads = np.zeros(chunk_size, dtype=BEAD_NAME_DTYPE)
         state.count = 0
 
     state.init_count = state.count
 
     # Select methods for random walk
-    if state.run_on_gpu:
-        from mbuild.path.path_utils_gpu import check_path_split
-
-        logger.info("Running hard_sphere_random_walk on a CUDA device.")
-        check_path_gpu = check_path_split
-    else:
-        check_path_gpu = None
-
-    # Minimum-image overlap check (GPU kernel not yet PBC-aware).
-    if any(p for p in pbc):
-        _pbc = np.asarray(pbc, dtype=np.bool_)
-        _box_lengths = np.asarray(box_lengths, dtype=np.float32)
-    else:
-        _pbc = np.zeros(3, dtype=np.bool_)
-        _box_lengths = np.full(3, np.inf, dtype=np.float32)
-    check_path_cpu = partial(check_path, pbc=_pbc, box_lengths=_box_lengths)
+    check_path_cpu = check_path
     next_step = random_coordinate
 
     # Set start time for wall time terminator
@@ -1117,43 +1487,45 @@ def hard_sphere_random_walk(
     if state.check_termination(path, coordinates, beads):
         return path
 
-    # Prepare GPU static points if using GPU
-    if state.run_on_gpu:
-        from numba import cuda
-
-        static_parts = []
-        if state.init_count > 0:
-            static_parts.append(coordinates[: state.init_count])
-        if include_compound:
-            static_parts.append(include_compound.xyz)
-        if static_parts:
-            static_points = np.concatenate(static_parts).astype(np.float32)
-            state.gpu_static_points = cuda.to_device(static_points)
-
     # Main random walk loop
     walk_finished = False
     while not walk_finished:
         batch_angles, batch_vectors, batch_phis = generate_trials(state)
-        # A dihedral needs three prior sites; only apply phi from the 4th site on.
-        if state.count >= 3:
+        pos1 = coordinates[state.count - 1]
+        pos2 = coordinates[state.count - 2]
+        # A dihedral needs three prior sites of this walk; only apply phi from
+        # its 4th site on. state.count indexes the whole path, which may already
+        # hold other chains, so count this walk's sites from init_count.
+        if batch_phis is not None and state.count - state.init_count >= 3:
             pos3 = coordinates[state.count - 3]
             phis = batch_phis
         else:
             pos3 = None
             phis = None
+        if any(pbc):
+            # Stored coordinates are wrapped, and next_step measures the angle
+            # from pos2 - pos1 and the dihedral from pos3 - pos2. Bring each
+            # site into the image nearest its bonded neighbour. box_lengths is
+            # inf on aperiodic axes.
+            delta = pos2 - pos1
+            delta[pbc] -= np.round(delta[pbc] / box_lengths[pbc]) * box_lengths[pbc]
+            pos2 = pos1 + delta
+            if pos3 is not None:
+                delta = pos3 - pos2
+                delta[pbc] -= np.round(delta[pbc] / box_lengths[pbc]) * box_lengths[pbc]
+                pos3 = pos2 + delta
         candidates = next_step(
-            pos1=coordinates[state.count - 1],
-            pos2=coordinates[state.count - 2],
+            pos1=pos1,
+            pos2=pos2,
             bond_length=bond_length,
             thetas=batch_angles,
             r_vectors=batch_vectors,
             pos3=pos3,
             phis=phis,
         )
-        # Create mask for particles inside volume constraint, allows for PBC
         if state.volume_constraint:
             is_inside_mask = volume_constraint.is_inside(
-                points=candidates, buffer=radius
+                points=candidates, buffer=tolerance
             )
             candidates = candidates[is_inside_mask]
         # If there is a bias, sort candidates according to the bias
@@ -1163,46 +1535,36 @@ def hard_sphere_random_walk(
                 coordinates=coordinates[: state.count],
                 names=beads[: state.count],
             )
-        # Handle postion for PBCs
+        # Handle postion for PBCs.
         if any(pbc):
-            candidates = volume_constraint.mins + np.mod(
-                candidates - volume_constraint.mins, box_lengths
-            )
+            candidates = (
+                volume_constraint.mins
+                + np.mod(candidates - volume_constraint.mins, box_lengths)
+            ).astype(np.float32)
         # Check candidate sites
         accept_xyz = None
-        if state.run_on_gpu and len(candidates) > 0:
-            # Run on GPU checks all candidates, choses the first accepted
-            dynamic_points = coordinates[state.init_count : state.count]
-            valid_mask = check_path_gpu(
-                state.gpu_static_points,
-                dynamic_points,
-                candidates,
-                radius,
-                tolerance,
-            )
-            valid_candidates = candidates[valid_mask]
-            if len(valid_candidates) > 0:
-                accept_xyz = valid_candidates[0]
-        else:
-            existing_points = coordinates[: state.count]
-            if state.include_compound:  # Include compound's particle coordinates
-                existing_points = np.concat((existing_points, include_compound.xyz))
-            # Iterate through current state of candidates, break after first accept
-            for xyz in candidates:
-                if check_path_cpu(
-                    existing_points=existing_points,
-                    new_point=xyz,
-                    radius=radius,
-                    tolerance=tolerance,
-                ):
-                    accept_xyz = xyz
-                    break
+        existing_points = coordinates[: state.count]
+        if state.include_compound:  # Include compound's particle coordinates
+            existing_points = np.concat((existing_points, include_compound.xyz))
+        excluded_indices = state.excluded_indices()
+        # Iterate through current state of candidates, break after first accept
+        for xyz in candidates:
+            if check_path_cpu(
+                existing_points=existing_points,
+                new_point=xyz,
+                radius=radius,
+                tolerance=tolerance,
+                pbc=pbc,
+                box_lengths=box_lengths,
+                excluded_indices=excluded_indices,
+            ):
+                accept_xyz = xyz
+                break
 
         if accept_xyz is not None:
             coordinates[state.count] = accept_xyz
             beads[state.count] = next(namer)
             state.count += 1
-
         state.attempts += 1
 
         # Extend coordinates array if we're running out of space
@@ -1216,18 +1578,58 @@ def hard_sphere_random_walk(
         walk_finished = termination.is_met(
             coordinates=coordinates[: state.count], names=beads[: state.count]
         )
-    state.check_termination(path, coordinates, beads)
+    if not state.check_termination(path, coordinates, beads):
+        # remove unfinished walk
+        path.remove_nodes(range(state.init_count, len(path)))
 
     return path
+
+
+def _normalize_initial_point(initial_point):
+    """Resolve a user given initial_point into a value and what it means.
+
+    An initial point is either a coordinate to start the walk at, or an index
+    of a site in an existing path to start the walk from. A sequence of 3
+    values is a coordinate. Any single integer is an index, including numpy
+    integer scalars and single element integer arrays such as ``np.int64(4)``,
+    ``np.array(4)`` and ``np.array([4])``. Indices are returned as python ints.
+
+    Parameters
+    ----------
+    initial_point : array-like, int or None
+        The initial_point argument given to a random walk.
+
+    Returns
+    -------
+    value : np.ndarray of shape (3,), int or None
+        The coordinate, the site index, or None if no initial point was given.
+    starting_from_site : bool
+        True when value is an index of a site in an existing path.
+
+    Raises
+    ------
+    ValueError
+        If initial_point is neither a 3 coordinate array nor an integer index.
+    """
+    if initial_point is None:
+        return None, False
+    point = np.asarray(initial_point)
+    if point.ndim == 1 and point.size == 3:
+        return point, False
+    if point.size == 1 and np.issubdtype(point.dtype, np.integer):
+        return point.item(), True
+    raise ValueError(
+        f"Unsupported initial_point {initial_point!r}. Pass either an "
+        "array-like of 3 coordinates, or an integer index of a site in the "
+        "coordinates of an existing path."
+    )
 
 
 class RandomWalkState:
     """Tracks state and configuration for a hard_sphere_random_walk.
 
-
     This class encapsulates all the bookkeeping information needed during
     a random walk, keeping the Path object clean of implementation details.
-
 
     Attributes
     ----------
@@ -1247,8 +1649,11 @@ class RandomWalkState:
         Total number of attempted moves
     start_time : float
         Time when the random walk started (for WallTime terminator)
-    initial_point : np.ndarray or None
-        Specified initial coordinate
+    initial_point : np.ndarray, int or None
+        Specified initial coordinate, or the index of the site in an existing
+        path that this walk starts from
+    starting_from_site : bool
+        True when initial_point is an index of a site in an existing path
     include_compound : mbuild.compound.Compound, default None
         If an mBuild Compound is given, the random walk with include its coordinates
         when checking for overlapping sites.
@@ -1262,10 +1667,6 @@ class RandomWalkState:
         Number of trial moves per step
     chunk_size : int
         Size of coordinate chunks to allocate
-    run_on_gpu : bool
-        Whether GPU acceleration is being used
-    gpu_static_points : device array or None
-        GPU array of static points for overlap checking
     """
 
     def __init__(
@@ -1286,98 +1687,128 @@ class RandomWalkState:
         tolerance=1e-5,
         trial_batch_size=20,
         chunk_size=512,
-        run_on_gpu=False,
+        rng=None,
     ):
         self.bond_length = bond_length
         self.radius = radius
-        if bond_length < radius:
-            raise ValueError(
-                "Bond length should be greater than radius to prevent overlaps."
-            )
+        # Single RNG drives all walk randomness (angles, positions, bias,
+        # volume-constraint sampling).
+        if rng is None:
+            rng = np.random.default_rng(seed + previous_count)
+        self.rng = rng
+        # Multiple ways to handle angles_sampler arg:
         if angles_sampler is None:
             self.angles = AnglesSampler(
-                "uniform", {"low": np.pi / 2, "high": np.pi}, seed
+                "uniform", {"low": np.pi / 2, "high": np.pi}, rng=self.rng
             )
-        elif isinstance(angles_sampler, tuple):
+        # Pass in a tupe or list of (low, high)
+        elif isinstance(angles_sampler, (tuple, list)) and len(angles_sampler) == 2:
             self.angles = AnglesSampler(
-                "uniform", {"low": angles_sampler[0], "high": angles_sampler[1]}, seed
+                "uniform",
+                {"low": angles_sampler[0], "high": angles_sampler[1]},
+                rng=self.rng,
             )
-        elif (
-            isinstance(angles_sampler, dict)
-            and angles_sampler.get("loc")
-            and angles_sampler.get("scale")
-        ):
-            self.angles = AnglesSampler("normal", angles_sampler, seed)
-        elif isinstance(angles_sampler, np.ndarray):
-            if angles_sampler.ndim == 1:
-                self.angles = AnglesSampler("choice", {"a": angles_sampler}, seed)
-            elif angles_sampler.ndim == 2:
-                # [values, probabilities] -> sample theta ~ P(theta) from a table.
-                self.angles = AnglesSampler(
-                    "tabulated",
-                    {"values": angles_sampler[0], "probabilities": angles_sampler[1]},
-                    seed,
-                )
+        # Pass in a dict with supported kwargs
+        elif isinstance(angles_sampler, dict):
+            if "loc" in angles_sampler and "scale" in angles_sampler:
+                self.angles = AnglesSampler("normal", angles_sampler, rng=self.rng)
+            elif "low" in angles_sampler and "high" in angles_sampler:
+                self.angles = AnglesSampler("uniform", angles_sampler, rng=self.rng)
             else:
                 raise ValueError(
-                    f"rw_angles array must be 1D or 2D, got {angles_sampler.ndim}D."
+                    f"kwargs {angles_sampler} cannot be used to create an "
+                    "AnglesSampler. Pass either {'loc': mean, 'scale': std} for "
+                    "a normal distribution, or {'low': min, 'high': max} for a "
+                    "uniform distribution."
                 )
+        # Pass in an array of choices
+        elif isinstance(angles_sampler, np.ndarray):
+            if angles_sampler.ndim == 1:
+                kwargs = {"a": angles_sampler}
+            elif angles_sampler.ndim == 2:
+                kwargs = {"a": angles_sampler[0], "p": angles_sampler[1]}
+            else:
+                raise ValueError(
+                    "Sampling angles from an array of choices is only supported for 1D and 2D arrays."
+                )
+            self.angles = AnglesSampler("choice", kwargs, rng=self.rng)
+        # Pass in an AnglesSampler instance.
         elif isinstance(angles_sampler, AnglesSampler):
             self.angles = angles_sampler
+            self.angles.rng = self.rng
         else:
             raise ValueError(
-                f"Please provide a reasonable value to set the rw_angles. Passed {angles_sampler}"
+                f"{angles_sampler} is not a supported form to sample angles. "
+                "See mbuild.path.points.AnglesSampler."
             )
         # Optional dihedral sampler. None disables dihedral control (the azimuth
         # stays random -> uniform dihedral). Otherwise mirrors the angle sampler
-        # forms. A distinct seed (seed + 1) decorrelates it from the angle stream.
+        # forms, and draws from the same walk RNG.
         if dihedrals_sampler is None:
             self.dihedrals = None
         elif isinstance(dihedrals_sampler, AnglesSampler):
             self.dihedrals = dihedrals_sampler
-        elif isinstance(dihedrals_sampler, tuple):
+            self.dihedrals.rng = self.rng
+        elif (
+            isinstance(dihedrals_sampler, (tuple, list)) and len(dihedrals_sampler) == 2
+        ):
             self.dihedrals = AnglesSampler(
                 "uniform",
                 {"low": dihedrals_sampler[0], "high": dihedrals_sampler[1]},
-                seed + 1,
+                rng=self.rng,
             )
-        elif (
-            isinstance(dihedrals_sampler, dict)
-            and dihedrals_sampler.get("loc")
-            and dihedrals_sampler.get("scale")
-        ):
-            self.dihedrals = AnglesSampler("normal", dihedrals_sampler, seed + 1)
+        elif isinstance(dihedrals_sampler, dict):
+            # Test for the keys, not their values: loc = 0 (cis) is valid.
+            if "loc" in dihedrals_sampler and "scale" in dihedrals_sampler:
+                self.dihedrals = AnglesSampler(
+                    "normal", dihedrals_sampler, rng=self.rng
+                )
+            elif "low" in dihedrals_sampler and "high" in dihedrals_sampler:
+                self.dihedrals = AnglesSampler(
+                    "uniform", dihedrals_sampler, rng=self.rng
+                )
+            else:
+                raise ValueError(
+                    f"kwargs {dihedrals_sampler} cannot be used to create an "
+                    "AnglesSampler for dihedrals. Pass either {'loc': mean, "
+                    "'scale': std} or {'low': min, 'high': max}."
+                )
         elif isinstance(dihedrals_sampler, np.ndarray):
             if dihedrals_sampler.ndim == 1:
-                self.dihedrals = AnglesSampler(
-                    "choice", {"a": dihedrals_sampler}, seed + 1
-                )
+                kwargs = {"a": dihedrals_sampler}
             elif dihedrals_sampler.ndim == 2:
-                # [values, probabilities] -> sample phi ~ P(phi) from a table.
-                self.dihedrals = AnglesSampler(
-                    "tabulated",
-                    {
-                        "values": dihedrals_sampler[0],
-                        "probabilities": dihedrals_sampler[1],
-                    },
-                    seed + 1,
-                )
+                kwargs = {"a": dihedrals_sampler[0], "p": dihedrals_sampler[1]}
             else:
                 raise ValueError(
                     f"rw_dihedrals array must be 1D or 2D, got {dihedrals_sampler.ndim}D."
                 )
+            self.dihedrals = AnglesSampler("choice", kwargs, rng=self.rng)
         else:
             raise ValueError(
-                f"Please provide a reasonable value to set the rw_dihedrals. Passed {dihedrals_sampler}"
+                f"{dihedrals_sampler} is not a supported form to sample dihedrals. "
+                "See mbuild.path.points.AnglesSampler."
             )
         self.bead_name = bead_name
-        if hasattr(initial_point, "__len__") and len(initial_point) == 3:
-            self.initial_point = np.asarray(initial_point)
-        else:
-            self.initial_point = initial_point
-        self.previous_count = previous_count
-        self.include_compound = include_compound
+        self.initial_point, self.starting_from_site = _normalize_initial_point(
+            initial_point
+        )
         self.connectivity = connectivity
+        self.previous_count = previous_count
+        self.attaches_to_path = self.connectivity == "link-linear"
+        self.attach_index = -1  # default case
+        if self.attaches_to_path:
+            self.attach_index = (
+                self.initial_point
+                if self.starting_from_site
+                else self.previous_count - 1
+            )
+        self.initial_point_distance = (
+            self.bond_length
+            if self.attaches_to_path
+            else max(self.bond_length, self.radius)
+        )
+
+        self.include_compound = include_compound
         self.seed = seed
         self.volume_constraint = volume_constraint
         self.termination = termination
@@ -1385,14 +1816,44 @@ class RandomWalkState:
         self.bias = bias
         self.trial_batch_size = trial_batch_size
         self.chunk_size = chunk_size
-        self.run_on_gpu = run_on_gpu
+        check_angle_range(bond_length, radius, self.angles)
 
         # State tracking
+        self._excluded_buffer = np.empty(1, dtype=np.int64)
+        self._no_excluded = np.empty(0, dtype=np.int64)
         self.count = 0
         self.init_count = 0
         self.attempts = 0
         self.start_time = None
-        self.gpu_static_points = None
+        # PBC info for overlap checks; populated in hard_sphere_random_walk.
+        # Defaults reproduce non-periodic behavior.
+        self.pbc = np.array([False, False, False], dtype=np.bool_)
+        self.box_lengths = np.array([np.inf, np.inf, np.inf], dtype=np.float32)
+
+    def excluded_indices(self):
+        """Return indices of existing sites bonded to the next candidate.
+
+        Candidates are generated at the bond length from the site they bond
+        to, so that site is left out of the overlap check. Returns the last
+        accepted site once this walk has placed one, the attach site when
+        placing the first site of a walk that links to an existing path, and
+        an empty array when the next candidate has no bonded neighbor among
+        the existing sites.
+        """
+        if self.count > self.previous_count:
+            self._excluded_buffer[0] = self.count - 1
+            return self._excluded_buffer
+        attach_index = self.attach_index
+        if attach_index < 0:
+            return self._no_excluded
+        self._excluded_buffer[0] = attach_index
+        return self._excluded_buffer
+
+    def clean_termination(self):
+        """Clean attached termination checks, check states before cleaning and clean before exiting hsrw."""
+        if self.bias:
+            self.bias._clean()
+        self.termination._clean()
 
     def check_termination(self, path, coordinates, beads):
         """Examine and process termination if we have reached.
@@ -1419,244 +1880,15 @@ class RandomWalkState:
             else:
                 logger.warning("Random walk not successful.")
                 logger.warning(self.termination.summarize())
-                return True
+                self.clean_termination()
+                return False
             # RW is terminated and successful, update bond graph
-            self.termination._clean()
-            if self.bias:
-                self.bias._clean()
+            self.clean_termination()
             path._extend_bond_graph()
-            if isinstance(
-                self.initial_point, int
-            ):  # make sure to build from previous point instead of last point
-                path._connect_edges(
-                    self.connectivity,
-                    np.arange(self.previous_count, self.count),
-                    self.initial_point,
-                )
-            else:  # build bond graph, and connect to last index in previous path coordinates
-                path._connect_edges(
-                    self.connectivity,
-                    np.arange(self.previous_count, self.count),
-                    self.previous_count,
-                )
-            # path._extend_beads(self.bead_name)
+            path._connect_edges(
+                self.connectivity,
+                np.arange(self.previous_count, self.count),
+                self.attach_index,
+            )
             return True
         return False
-
-
-def crosslink(
-    path,
-    bead_name="_R",
-    backbone_name="_A",
-    radius=0.1,
-    excluded_bond_depth=2,
-    n_connection_sites=2,
-    volume_constraint=None,
-    initial_point=None,
-    seed=42,
-    chunk_size=512,
-    run_on_gpu=False,
-):
-    """
-    Create a crosslink node that bonds to n_connection_sites backbone beads.
-
-    Adds a new node with bead_name to path.bond_graph, positioned near
-    and bonded to n_connection_sites backbone beads within the specified radius.
-
-    Parameters
-    ----------
-    path : Path
-        The Path object containing coordinates and bond_graph
-    bead_name : str, default "_R"
-        Name for the crosslink bead
-    backbone_name : str, default "_A"
-        Name for backbone beads to search for
-    radius : float, default 0.1
-        Search radius for finding nearby backbone beads
-    n_connection_sites : int, default 2
-        Number of backbone beads to bond to
-    initial_point : int or array-like, optional
-        Starting point (node index or xyz coordinate) to search around
-    seed : int, default 42
-        Random seed for reproducibility
-    chunk_size : int, default 512
-        Chunk size for batch processing (used if extending coordinates)
-    run_on_gpu : bool, default False
-        Whether to use GPU acceleration via numba
-
-    Returns
-    -------
-    Path
-        The modified path object with the new crosslink node
-    """
-    rng = np.random.default_rng(seed + len(path.coordinates))
-
-    # Find all backbone beads
-    backbone_nodes = [
-        node
-        for node in path.bond_graph.nodes()
-        if (
-            path.beads[node] == backbone_name
-            # and path.bond_graph.degree[node] <= 2
-        )  # TODO: Multiple crosslink sites on one backbone too
-    ]  # value references global node index
-    backbone_subgraph = path.bond_graph.subgraph(
-        backbone_nodes
-    )  # TODO: make a path function?
-
-    if len(backbone_nodes) == 0:
-        raise ValueError(f"No backbone beads with name '{backbone_name}' found in path")
-
-    if len(backbone_nodes) < n_connection_sites:
-        raise ValueError(
-            f"Not enough backbone beads ({len(backbone_nodes)}) for "
-            f"{n_connection_sites} connection sites"
-        )
-
-        # Set up PBC info from volume constraints
-    if isinstance(volume_constraint, CuboidConstraint):
-        pbc = volume_constraint.pbc
-        box_lengths = volume_constraint.box_lengths.astype(np.float32)
-    elif isinstance(volume_constraint, CylinderConstraint):
-        pbc = (False, False, volume_constraint.periodic_height)
-        box_lengths = np.array(
-            [
-                volume_constraint.radius * 2,
-                volume_constraint.radius * 2,
-                volume_constraint.height,
-            ]
-        ).astype(np.float32)
-    else:
-        pbc = np.array([False, False, False], dtype=bool)
-        box_lengths = np.array([np.inf, np.inf, np.inf], dtype=np.float32)
-
-    # Get coordinates of all backbone nodes
-    candidate_nodes = [
-        node for node in backbone_nodes if path.bond_graph.degree[node] <= 2
-    ]
-    candidate_coords = np.array(path.coordinates[candidate_nodes], dtype=np.float32)
-
-    # get reference points
-    def get_reference_points(path, initial_point):
-        """Create reference points for finding candidates.
-
-        Returns
-        -------
-        nodesArray: np.array
-            index of global bond_graph nodes that are viable starting points -> [0,2,10...]
-        coordsArray: np.array
-            each value matches path.coordinates[nodesList]
-        """
-        if initial_point is not None:
-            if isinstance(initial_point, (int, np.integer)):
-                # Use coordinate of specified node
-                if initial_point not in path.bond_graph.nodes:
-                    raise ValueError(f"Node {initial_point} not found in bond_graph")
-                nodesArray = np.array([initial_point])
-                coordsArray = np.array([path.coordinates[initial_point]])
-            else:
-                # Use provided coordinate
-                initial_point32 = np.asarray(initial_point, dtype=np.float32)
-                sq_distances = calculate_sq_distances(
-                    initial_point32, candidate_coords, pbc=pbc, box_lengths=box_lengths
-                )
-                nodesArray = np.argsort(sq_distances)
-                coordsArray = path.coordinates[nodesArray]
-        else:
-            # Randomly select a backbone node as reference
-            nodesArray = rng.choice(
-                candidate_nodes, size=len(candidate_nodes), replace=False
-            )
-            coordsArray = path.coordinates[nodesArray]
-
-        return nodesArray, coordsArray
-
-    ref_nodes, ref_coords = get_reference_points(path, initial_point)
-
-    found_ref = False  # flag to check all ref_nodes
-    for ref_node, ref_coord in zip(ref_nodes, ref_coords):
-        selected_nodes = [ref_node]  # first choice is ref
-        # GPU-accelerated distance calculation
-        sq_distances = calculate_sq_distances(
-            ref_coord, candidate_coords, pbc=pbc, box_lengths=box_lengths
-        )
-        distances = np.sqrt(sq_distances)
-
-        # Find candidates within radius
-        within_radius_mask = distances <= (radius) * 2  # twice radiu
-        possible_pairs = np.where(within_radius_mask)[0]
-        # Verify starting point or return early
-        if len(possible_pairs) < n_connection_sites - 1:
-            continue
-
-        closest_paired_nodes = possible_pairs[np.argsort(distances[possible_pairs])]
-        excluded_nodes = set(
-            nx.single_source_shortest_path_length(
-                backbone_subgraph, ref_node, cutoff=excluded_bond_depth
-            ).keys()
-        )
-        # import pdb; pdb.set_trace()
-        for idx in closest_paired_nodes:
-            node = candidate_nodes[idx]  # temp replace
-            # node = possible_pairs[idx] # is index == value ??
-            if node in excluded_nodes:
-                continue
-
-            selected_nodes.append(int(node))
-
-            # Stop if we have enough connection sites
-            if len(selected_nodes) >= n_connection_sites:
-                found_ref = True
-                break  # break twice
-        if found_ref:
-            break
-
-    # Verify enough final viable crosslink
-    if not found_ref:
-        n_clinks = sum([bead == bead_name for bead in path.beads])
-        raise PathConvergenceError(
-            f"Only found {len(selected_nodes)} non-neighboring backbone beads "
-            f"within radius {radius}, need {n_connection_sites}."
-            f"\nMaximum crossinks found are {n_clinks}. "
-            "Ways to increase crosslinking:\nIncrease radius"
-            "\nPack at higher density\nRelax structure."
-        )
-
-    # Calculate position for new crosslink node (centroid of selected beads)
-    selected_coords = np.array(path.coordinates[selected_nodes])
-    crosslink_position = np.mean(selected_coords, axis=0)
-
-    # Add new node to path
-    path.append_coordinates(crosslink_position, bead_name)
-    new_node_idx = len(path.coordinates) - 1  # add as last index
-
-    # Add edges from crosslink node to selected backbone nodes
-    for backbone_node in selected_nodes:
-        path.bond_graph.add_edge(
-            int(new_node_idx),
-            int(backbone_node),
-            bond_type=(bead_name, backbone_name),
-        )
-
-    return path
-
-
-class CrosslinkWalkState:
-    # TODO
-    pass
-
-
-_CUDA_AVAILABLE = None
-
-
-def _get_cuda_available():
-    """Check if numba can access CUDA runtime."""
-    global _CUDA_AVAILABLE
-    if _CUDA_AVAILABLE is None:
-        try:
-            from numba import cuda
-
-            _CUDA_AVAILABLE = cuda.is_available()
-        except Exception:
-            _CUDA_AVAILABLE = False
-    return _CUDA_AVAILABLE

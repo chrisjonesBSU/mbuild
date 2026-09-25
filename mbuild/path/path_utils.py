@@ -3,8 +3,12 @@ These methods are primarly used by other functions and classes in mbuild.Path an
 should rarely need to be called directly by users.
 """
 
+import logging
+
 import numpy as np
 from numba import njit
+
+logger = logging.getLogger(__name__)
 
 
 @njit(cache=True, fastmath=True)
@@ -107,7 +111,15 @@ def random_coordinate(
 
 
 @njit(cache=True, fastmath=True)
-def check_path(existing_points, new_point, radius, tolerance, pbc, box_lengths):
+def check_path(
+    existing_points,
+    new_point,
+    radius,
+    tolerance,
+    pbc=np.array([False, False, False], dtype=bool),
+    box_lengths=np.array([np.inf, np.inf, np.inf], dtype=np.float32),
+    excluded_indices=np.empty(0, dtype=np.int64),
+):
     """Default check path method for HardSphereRandomWalk.
 
     Parameters
@@ -122,23 +134,39 @@ def check_path(existing_points, new_point, radius, tolerance, pbc, box_lengths):
         The radius used for hard-sphere overlap checks.
     tolerance : float, required
         Tolerance in center-to-center distances, allowing for rounding errors.
-    pbc : np.ndarray (3,) of bool, required
-        Per-axis periodic boundary flags. Where True, the corresponding
-        component is compared under the minimum image convention so that
-        candidates near a box face are tested against beads on the opposite
-        face (wrapping the candidate position alone is not sufficient).
-    box_lengths : np.ndarray (3,) of float, required
-        Per-axis box lengths used for the minimum image. Ignored on axes
-        where ``pbc`` is False (pass ``np.inf`` there if desired).
+    pbc : np.ndarray (3,) of bool, optional
+        Periodic boundary flags per axis. When an axis is periodic, the
+        center-to-center distance along that axis uses the minimum-image
+        convention so overlaps across a periodic face are detected. The
+        default of all ``False`` reproduces the non-periodic behavior.
+    box_lengths : np.ndarray (3,) of float, optional
+        Box length along each axis, used for the minimum-image wrap on
+        periodic axes. Only consulted where ``pbc`` is ``True``.
+    excluded_indices : np.ndarray (K,) of int, optional
+        Indices into ``existing_points`` that are skipped, sorted ascending.
+        Used to leave out sites bonded to ``new_point``, whose separation is
+        set by the bond length rather than by ``radius``. Indices at or past
+        the end of ``existing_points`` are ignored. The default of an empty
+        array checks every point.
     """
     if existing_points is None or existing_points.size == 0:
         return True
     min_sq_dist = (radius - tolerance) ** 2
+    n_excluded = excluded_indices.shape[0]
+    next_excluded = 0  # counter to increment along excluded_indices, which is sorted
+    use_pbc = np.array(
+        [pbc[j] and not (box_lengths[j] + 1 == box_lengths[j]) for j in range(3)]
+    )
     for i in range(existing_points.shape[0]):
+        # excluded_indices ascends alongside i, so one comparison per point
+        if next_excluded < n_excluded and i == excluded_indices[next_excluded]:
+            next_excluded += 1
+            continue
         dist_sq = 0.0
         for j in range(existing_points.shape[1]):
             diff = existing_points[i, j] - new_point[j]
-            if pbc[j]:
+            # Apply minimum-image convention on periodic axes
+            if use_pbc[j]:
                 diff -= np.round(diff / box_lengths[j]) * box_lengths[j]
             dist_sq += diff * diff
         if dist_sq < min_sq_dist:
@@ -324,3 +352,89 @@ def find_candidates_within_radius(
         within_radius[i] = dist2 <= r2_cut
 
     return within_radius
+
+
+# The warning below reports whole percent, so a smaller rejected weight is noise.
+_MIN_REPORTED_FRACTION = 0.005
+
+
+def _choice_weights(angles_sampler):
+    """Return a choice sampler's angles and their normalized weights."""
+    angles = np.asarray(angles_sampler.kwargs["a"], dtype=float)
+    weights = angles_sampler.kwargs.get("p")
+    if weights is None:
+        weights = np.full(angles.shape, 1.0 / angles.size)
+    else:
+        weights = np.asarray(weights, dtype=float)
+        weights = weights / weights.sum()
+    return angles, weights
+
+
+def _angle_range(angles_sampler):
+    """Return the smallest and largest angle a sampler can produce.
+
+    Angles a weighted choice sampler assigns zero probability are left out.
+    Returns None for distributions with unbounded support.
+    """
+    if angles_sampler.distribution == "uniform":
+        return (
+            float(angles_sampler.kwargs["low"]),
+            float(angles_sampler.kwargs["high"]),
+        )
+    if angles_sampler.distribution == "choice":
+        angles, weights = _choice_weights(angles_sampler)
+        sampled = angles[weights > 0]
+        if sampled.size == 0:
+            return None
+        return float(sampled.min()), float(sampled.max())
+    return None
+
+
+def check_angle_range(bond_length, radius, angles_sampler):
+    """Compare the sampled angle range against the angle radius allows.
+
+    Sites two bonds apart are separated by ``2 * bond_length * sin(theta / 2)``
+    for a bond angle theta, and are not excluded from the overlap check. Angles
+    below the critical angle place a new site within ``radius`` of the site two
+    bonds back, so those angles are always rejected.
+
+    Raises
+    ------
+    ValueError
+        If no angle in the sampled range can avoid the overlap.
+    """
+    ratio = radius / (2.0 * bond_length)
+    if ratio > 1.0:
+        raise ValueError(
+            f"A {radius=} larger than twice {bond_length=} leaves no bond angle "
+            "that avoids overlapping the site two bonds back. Reduce radius or "
+            "increase bond_length."
+        )
+    critical_angle = 2.0 * np.arcsin(ratio)
+    angle_range = _angle_range(angles_sampler)
+    if angle_range is None:
+        return
+    low, high = angle_range
+    if critical_angle >= high:
+        raise ValueError(
+            f"With {bond_length=} and {radius=}, bond angles below "
+            f"{np.degrees(critical_angle):.1f} degrees overlap the site two "
+            f"bonds back, which rejects every angle in the sampled range of "
+            f"{np.degrees(low):.1f} to {np.degrees(high):.1f} degrees. "
+            "Reduce radius, increase bond_length, or raise rw_angles."
+        )
+    if critical_angle > low:
+        if angles_sampler.distribution == "uniform":
+            fraction = (critical_angle - low) / (high - low)
+        else:
+            angles, weights = _choice_weights(angles_sampler)
+            fraction = float(weights[angles < critical_angle].sum())
+        if fraction < _MIN_REPORTED_FRACTION:
+            return
+        logger.warning(
+            f"With {bond_length=} and {radius=}, bond angles below "
+            f"{np.degrees(critical_angle):.1f} degrees overlap the site two "
+            f"bonds back. This rejects {fraction:.0%} of the sampled range "
+            f"starting at {np.degrees(low):.1f} degrees, biasing the walk "
+            "toward wider angles."
+        )
