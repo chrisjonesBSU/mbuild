@@ -295,6 +295,12 @@ class AnglesSampler:
     tabulated distribution P(y) (e.g. a target ``P(theta)`` / ``P(phi)`` measured
     from an MD simulation or built from a table potential).
 
+    Samples are used as-is, so a sampler should describe the distribution you
+    want to observe in the built chain. When converting a potential U into a
+    distribution, bond angles need the solid-angle factor,
+    ``P(theta) ~ exp(-U/kT) * sin(theta)``, while dihedrals do not,
+    ``P(phi) ~ exp(-U/kT)``.
+
     NOTES
     -----
     - ``"uniform"`` distribution should use ``'low'`` and ``'high'`` as kwargs.
@@ -302,9 +308,11 @@ class AnglesSampler:
     - ``"choice"`` distribution should use ``'a'`` (and optionally ``'p'``).
     - ``"tabulated"`` distribution should use ``'values'`` (the y grid) and
       ``'probabilities'`` (P(y), un-normalized weights are fine — they are
-      normalized internally). Optional ``'interpolate'`` (default ``True``)
-      selects continuous inverse-CDF sampling; ``False`` samples discretely at
-      the grid ``values``. The grid need not be sorted.
+      normalized internally). With ``'interpolate'`` True (the default), each
+      value is the center of a bin reaching halfway to its neighbors, sampled
+      uniformly within the bin; the first and last bins stop at the first and
+      last value, so samples never leave the grid's range. ``False`` samples
+      discretely at the grid ``values``. The grid need not be sorted.
     """
 
     def __init__(self, distributionStr, kwargs, rng=None):
@@ -350,17 +358,19 @@ class AnglesSampler:
         self._values = values[order]
         self._probs = probs[order] / total
         self.interpolate = bool(kwargs.get("interpolate", True))
-        # CDF on grid points, prepended with 0 so the inversion covers [0, 1).
+        # Cumulative probability at the bin edges.
         self._cdf = np.concatenate([[0.0], np.cumsum(self._probs)])
-        self._cdf_values = np.concatenate([[self._values[0]], self._values])
+        midpoints = (self._values[:-1] + self._values[1:]) / 2
+        self._bin_edges = np.concatenate(
+            [[self._values[0]], midpoints, [self._values[-1]]]
+        )
 
     def sample(self, size=None):
         if self.distribution == "tabulated":
             n = 1 if size is None else size
             u = self.rng.uniform(size=n)
             if self.interpolate:
-                # Continuous inverse-CDF (linear interpolation between grid points).
-                out = np.interp(u, self._cdf, self._cdf_values)
+                out = np.interp(u, self._cdf, self._bin_edges)
             else:
                 # Discrete: return the grid value of the bin u falls into.
                 idx = np.clip(

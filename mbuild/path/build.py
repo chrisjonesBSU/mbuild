@@ -1303,14 +1303,19 @@ def hard_sphere_random_walk(
         use a Gaussian distribution by passing a dict with keys {'loc':mean, 'scale':std}.
         Finally, a numpy array of 1D or 2D array of numpy values can be passed, which will be sampled
         via numpy.random.choice method. The 2D case provides a set of weights.
+        The sampled values are the bond angles the chain will have, so pass the
+        distribution you want to observe. To build it from an angle potential
+        U(theta), include the solid-angle factor: p(theta) ~ exp(-U/kT) * sin(theta).
     rw_dihedrals : tuple or dict or np.array or AnglesSampler, default None
         Set the dihedral sampling method, using the same forms as ``rw_angles``.
         The default of None leaves the azimuth random (uniform dihedral). When
         provided, the dihedral angle (formed by the previous three sites and the
         new site) is sampled and reproduced for each placed site from the fourth
-        site onward. The convention uses (cis = 0, trans = +/-pi).
-        A 1D numpy array is sampled via
-        ``numpy.random.choice`` (e.g. draws from a target P(phi)).
+        site onward. The convention uses (cis = 0, trans = +/-pi), matching
+        HOOMD. As with ``rw_angles``, pass the distribution you want to observe.
+        To build it from a dihedral potential U(phi), use p(phi) ~ exp(-U/kT)
+        with no sin factor: unlike the bond angle, the dihedral has uniform
+        measure over [-pi, pi].
     termination : termination condition, required
         Termination condition for the random walk. If an integer is passed,
         will terminate after reaching that number of sites. Can also pass a tuple of

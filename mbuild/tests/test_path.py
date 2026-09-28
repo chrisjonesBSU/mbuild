@@ -5,6 +5,7 @@ import mbuild as mb
 from mbuild.exceptions import PathConvergenceError
 from mbuild.path.build import (
     Path,
+    RandomWalkState,
     cyclic,
     hard_sphere_random_walk,
     helix,
@@ -23,6 +24,7 @@ from mbuild.path.namers import CyclicNamer, RandomNamer
 from mbuild.path.path_utils import (
     check_path,
     local_density,
+    random_coordinate,
     target_density,
     target_sq_distances,
 )
@@ -34,6 +36,59 @@ from mbuild.path.termination import (
 )
 from mbuild.tests.base_test import BaseTest
 from mbuild.utils.geometry import bounding_box
+from mbuild.utils.io import has_hoomd
+
+
+def _dihedral(p0, p1, p2, p3):
+    """Dihedral p0-p1-p2-p3 in HOOMD's convention (cis = 0, trans = +/-pi).
+
+    HOOMD's sign is the opposite of IUPAC's.
+    """
+    b1, b2, b3 = p1 - p0, p2 - p1, p3 - p2
+    n1, n2 = np.cross(b1, b2), np.cross(b2, b3)
+    m1 = np.cross(n1, b2 / np.linalg.norm(b2))
+    return -np.arctan2(m1 @ n2, n1 @ n2)
+
+
+def _angle_diff(a, b):
+    """a - b wrapped into [-pi, pi)."""
+    return np.angle(np.exp(1j * (np.asarray(a) - b)))
+
+
+def _circular_mean_std(phis):
+    """Circular mean and standard deviation of a set of angles."""
+    z = np.mean(np.exp(1j * np.asarray(phis)))
+    return np.angle(z), np.sqrt(-2 * np.log(np.abs(z)))
+
+
+def _unwrapped_chains(path, box_lengths=None):
+    """Return each linear chain's coordinates in bond order, unwrapped across
+    periodic boundaries when ``box_lengths`` is given."""
+    import networkx as nx
+
+    xyz = np.asarray(path.coordinates, dtype=float)
+    chains = []
+    for nodes in sorted(nx.connected_components(path.bond_graph), key=min):
+        sub = path.bond_graph.subgraph(nodes)
+        ends = sorted(n for n in sub if sub.degree(n) == 1)
+        order = nx.shortest_path(sub, ends[0], ends[1])
+        chain = [xyz[order[0]]]
+        for i, j in zip(order, order[1:]):
+            d = xyz[j] - xyz[i]
+            if box_lengths is not None:
+                d -= np.round(d / box_lengths) * box_lengths
+            chain.append(chain[-1] + d)
+        chains.append(np.array(chain))
+    return chains
+
+
+def _chain_geometry(chain):
+    """Bond angles and dihedrals along one unwrapped chain."""
+    bonds = np.diff(chain, axis=0)
+    units = bonds / np.linalg.norm(bonds, axis=1)[:, None]
+    thetas = np.arccos(np.clip(-(units[:-1] * units[1:]).sum(axis=1), -1, 1))
+    phis = [_dihedral(*chain[i : i + 4]) for i in range(len(chain) - 3)]
+    return thetas, np.array(phis)
 
 
 class TestPaths(BaseTest):
@@ -822,82 +877,6 @@ class TestRandomWalk(BaseTest):
         for coord in path.coordinates[1:]:
             assert all([x < 0 for x in coord])
 
-    def test_rw_normal_angles(self):
-        from scipy.stats import normaltest
-
-        num_sites = NumSites(1000)
-        path = hard_sphere_random_walk(  # TODO: Map Angles into 0 to np.pi domain
-            termination=num_sites,
-            radius=0.0001,
-            bond_length=1,
-            rw_angles={
-                "loc": np.pi / 2,
-                "scale": 0.001,
-            },  # larger scale doesn't center at mean
-        )
-        angles = []
-        for i, j, k in zip(
-            path.coordinates, path.coordinates[1:], path.coordinates[2:]
-        ):
-            BA = i - j
-            BC = k - j
-            norm_BA = np.linalg.norm(BA)
-            norm_BC = np.linalg.norm(BC)
-            angles.append(np.arccos(np.dot(BA, BC) / (norm_BA * norm_BC)))
-        _, p_value = normaltest(angles)
-        assert np.isclose(np.mean(angles), np.pi / 2, atol=1e-1)
-        assert p_value > 0.05
-
-    def test_rw_normal_angles_large_std(self):
-        from scipy.stats import normaltest
-
-        num_sites = NumSites(100)
-        path = hard_sphere_random_walk(
-            termination=num_sites,
-            radius=0.001,  # point particle so radius doesn't influence selection
-            bond_length=1,
-            rw_angles={"loc": np.pi / 2, "scale": 0.5},
-            trial_batch_size=8,
-        )
-        angles = []
-        for i, j, k in zip(
-            path.coordinates, path.coordinates[1:], path.coordinates[2:]
-        ):
-            BA = i - j
-            BC = k - j
-            norm_BA = np.linalg.norm(BA)
-            norm_BC = np.linalg.norm(BC)
-            angles.append(np.arccos(np.dot(BA, BC) / (norm_BA * norm_BC)))
-        _, p_value = normaltest(angles)
-        assert np.isclose(np.mean(angles), np.pi / 2, atol=1e-1)
-        assert p_value > 0.05
-
-    def test_rw_uniform_angles(self):
-        import scipy.stats
-
-        num_sites = NumSites(1000)
-        min_max_angles = (np.pi / 3, np.pi / 2)
-        path = hard_sphere_random_walk(
-            termination=num_sites,
-            radius=0.001,  # choose a point particle
-            bond_length=1,
-            rw_angles=min_max_angles,
-            trial_batch_size=1,
-        )
-        angles = []
-        for i, j, k in zip(
-            path.coordinates, path.coordinates[1:], path.coordinates[2:]
-        ):
-            BA = i - j
-            BC = k - j
-            norm_BA = np.linalg.norm(BA)
-            norm_BC = np.linalg.norm(BC)
-            angles.append(np.arccos(np.dot(BA, BC) / (norm_BA * norm_BC)))
-        uniform_loc_scale = (min_max_angles[0], min_max_angles[1] - min_max_angles[0])
-        _, p_val = scipy.stats.kstest(angles, "uniform", args=uniform_loc_scale)
-        assert p_val > 0.05
-        assert np.isclose(np.mean(angles), np.pi * 5 / 12, atol=1e-1)
-
     def test_rw_cyclic_namer_sequence(self):
         path = hard_sphere_random_walk(
             radius=0.1,
@@ -999,6 +978,43 @@ class TestRandomWalk(BaseTest):
         separation = np.linalg.norm(path.coordinates[6] - path.coordinates[2])
         assert separation >= 0.392 - 1e-5
 
+    def test_rw_dihedrals_seeds_user_sampler(self):
+        sampler = AnglesSampler("normal", {"loc": np.pi, "scale": 0.3})
+        kwargs = dict(
+            bond_length=0.25, radius=0.1, rw_dihedrals=sampler, seed=14, termination=30
+        )
+        path1 = hard_sphere_random_walk(**kwargs)
+        path2 = hard_sphere_random_walk(**kwargs)
+        assert np.allclose(path1.coordinates, path2.coordinates, atol=1e-7)
+
+    @pytest.mark.parametrize(
+        "form, distribution",
+        [
+            ({"loc": 0.0, "scale": 0.3}, "normal"),
+            ((-1.0, 1.0), "uniform"),
+            (np.array([[0.0, np.pi], [0.3, 0.7]]), "choice"),
+        ],
+    )
+    def test_rw_dihedrals_input_forms(self, form, distribution):
+        state = RandomWalkState(
+            bond_length=0.25,
+            radius=0.1,
+            angles_sampler=None,
+            bead_name="_A",
+            dihedrals_sampler=form,
+        )
+        assert state.dihedrals.distribution == distribution
+
+    @pytest.mark.parametrize("form", [{"mean": 1.0}, np.zeros((2, 2, 2))])
+    def test_rw_dihedrals_bad_input(self, form):
+        with pytest.raises(ValueError):
+            RandomWalkState(
+                bond_length=0.25,
+                radius=0.1,
+                angles_sampler=None,
+                bead_name="_A",
+                dihedrals_sampler=form,
+            )
 
 class TestPathUtils(BaseTest):
     def test_target_sq_distances_no_pbc(self):
@@ -1169,3 +1185,250 @@ class TestPathUtils(BaseTest):
             1e-5,
             excluded_indices=np.array([0], dtype=np.int64),
         )
+
+    @pytest.mark.parametrize(
+        "pos3",
+        [
+            np.array([0.0, 1.0, 0.0]),
+            np.array([-0.4, 0.3, 0.8]),
+            np.array([-1.0, 0.0, 0.0]),  # collinear with the pos2-pos1 bond
+        ],
+    )
+    def test_random_coordinate_dihedral(self, pos3):
+        pos2 = np.zeros(3, dtype=np.float32)
+        pos1 = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        pos3 = pos3.astype(np.float32)
+        phis = np.array([0.0, 1.0, -1.0, np.pi / 2, -2.5, np.pi], dtype=np.float32)
+        thetas = np.full(len(phis), 1.9, dtype=np.float32)
+        r_vectors = np.random.default_rng(0).normal(size=(len(phis), 3))
+        new = random_coordinate(
+            pos1, pos2, 0.25, thetas, r_vectors.astype(np.float32), pos3, phis
+        )
+        assert np.all(np.isfinite(new))
+        assert np.allclose(np.linalg.norm(new - pos1, axis=1), 0.25, atol=1e-5)
+        bond = (pos2 - pos1) / np.linalg.norm(pos2 - pos1)
+        steps = (new - pos1) / 0.25
+        assert np.allclose(np.arccos(steps @ bond), thetas, atol=1e-4)
+        if np.linalg.norm(np.cross(pos3 - pos2, pos1 - pos2)) > 1e-6:
+            measured = [_dihedral(pos3, pos2, pos1, x) for x in new.astype(float)]
+            assert np.allclose(_angle_diff(measured, phis), 0, atol=1e-4)
+
+    @pytest.mark.skipif(not has_hoomd, reason="hoomd is not installed")
+    def test_random_coordinate_dihedral_matches_hoomd(self):
+        import hoomd
+
+        pos3 = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        pos2 = np.zeros(3, dtype=np.float32)
+        pos1 = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        phi = 1.0
+        new = random_coordinate(
+            pos1,
+            pos2,
+            1.0,
+            np.array([1.9], dtype=np.float32),
+            np.ones((1, 3), dtype=np.float32),
+            pos3,
+            np.array([phi], dtype=np.float32),
+        )[0]
+
+        snapshot = hoomd.Snapshot()
+        snapshot.configuration.box = [20, 20, 20, 0, 0, 0]
+        snapshot.particles.N = 4
+        snapshot.particles.types = ["A"]
+        snapshot.particles.position[:] = [pos3, pos2, pos1, new]
+        snapshot.dihedrals.N = 1
+        snapshot.dihedrals.types = ["d"]
+        snapshot.dihedrals.group[:] = [[0, 1, 2, 3]]
+        sim = hoomd.Simulation(device=hoomd.device.CPU(), seed=1)
+        sim.create_state_from_snapshot(snapshot)
+        # phi0 = pi/2 makes the energy differ between +phi and -phi.
+        dihedral = hoomd.md.dihedral.Periodic()
+        dihedral.params["d"] = dict(k=2.0, d=1, n=1, phi0=np.pi / 2)
+        sim.operations.integrator = hoomd.md.Integrator(dt=0.001, forces=[dihedral])
+        sim.run(0)
+        expected = 0.5 * 2.0 * (1 + np.cos(phi - np.pi / 2))
+        assert np.isclose(dihedral.energy, expected, atol=1e-4)
+
+    def test_tabulated_sampler_discrete(self):
+        values = np.array([1.5, 0.5, 1.0])  # need not be sorted
+        sampler = AnglesSampler(
+            "tabulated",
+            {"values": values, "probabilities": [1, 1, 2], "interpolate": False},
+            rng=np.random.default_rng(0),
+        )
+        points = sampler.sample(5000)
+        assert set(np.unique(points)) <= set(values)
+        frequencies = [np.mean(points == v) for v in (0.5, 1.0, 1.5)]
+        assert np.allclose(frequencies, [0.25, 0.5, 0.25], atol=0.03)
+
+    def test_tabulated_sampler_interpolated(self):
+        sampler = AnglesSampler(
+            "tabulated",
+            {"values": [0.5, 1.0, 1.5], "probabilities": [1, 2, 1]},
+            rng=np.random.default_rng(0),
+        )
+        points = sampler.sample(5000)
+        assert points.min() >= 0.5 and points.max() <= 1.5
+        assert len(np.unique(points)) > 3
+        assert np.isclose(points.mean(), 1.0, atol=0.02)
+        assert np.ndim(sampler.sample()) == 0
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"values": [0.0, 1.0], "probabilities": [1.0, -1.0]},
+            {"values": [0.0, 1.0], "probabilities": [1.0, 1.0, 1.0]},
+        ],
+    )
+    def test_tabulated_sampler_bad_input(self, kwargs):
+        with pytest.raises(ValueError):
+            AnglesSampler("tabulated", kwargs)
+
+
+class TestChainStatistics(BaseTest):
+    """Chains built by hard_sphere_random_walk reproduce the requested
+    angle and dihedral distributions."""
+
+    @staticmethod
+    def _dihedral_walk(rw_dihedrals, box=None, n_chains=1, n_sites=200, seed=14):
+        """The radius is small so that overlap rejection does not change the
+        sampled angle and dihedral distributions."""
+        path = Path()
+        rng = np.random.default_rng(seed)
+        for i in range(n_chains):
+            initial_point = None
+            if box is not None:
+                initial_point = box.sample_candidates(
+                    points=path.coordinates, n_candidates=20, buffer=0.1, rng=rng
+                )[0]
+            hard_sphere_random_walk(
+                path=path,
+                termination=Termination([NumSites(n_sites), NumAttempts(1e4)]),
+                bond_length=0.25,
+                radius=0.05,
+                rw_angles={"loc": 1.95, "scale": 0.1},
+                rw_dihedrals=rw_dihedrals,
+                volume_constraint=box,
+                initial_point=initial_point,
+                seed=seed + i,
+            )
+        return path
+
+    def test_rw_normal_angles(self):
+        from scipy.stats import normaltest
+
+        num_sites = NumSites(1000)
+        path = hard_sphere_random_walk(  # TODO: Map Angles into 0 to np.pi domain
+            termination=num_sites,
+            radius=0.0001,
+            bond_length=1,
+            rw_angles={
+                "loc": np.pi / 2,
+                "scale": 0.001,
+            },  # larger scale doesn't center at mean
+        )
+        angles = []
+        for i, j, k in zip(
+            path.coordinates, path.coordinates[1:], path.coordinates[2:]
+        ):
+            BA = i - j
+            BC = k - j
+            norm_BA = np.linalg.norm(BA)
+            norm_BC = np.linalg.norm(BC)
+            angles.append(np.arccos(np.dot(BA, BC) / (norm_BA * norm_BC)))
+        _, p_value = normaltest(angles)
+        assert np.isclose(np.mean(angles), np.pi / 2, atol=1e-1)
+        assert p_value > 0.05
+
+    def test_rw_normal_angles_large_std(self):
+        from scipy.stats import normaltest
+
+        num_sites = NumSites(100)
+        path = hard_sphere_random_walk(
+            termination=num_sites,
+            radius=0.001,  # point particle so radius doesn't influence selection
+            bond_length=1,
+            rw_angles={"loc": np.pi / 2, "scale": 0.5},
+            trial_batch_size=8,
+        )
+        angles = []
+        for i, j, k in zip(
+            path.coordinates, path.coordinates[1:], path.coordinates[2:]
+        ):
+            BA = i - j
+            BC = k - j
+            norm_BA = np.linalg.norm(BA)
+            norm_BC = np.linalg.norm(BC)
+            angles.append(np.arccos(np.dot(BA, BC) / (norm_BA * norm_BC)))
+        _, p_value = normaltest(angles)
+        assert np.isclose(np.mean(angles), np.pi / 2, atol=1e-1)
+        assert p_value > 0.05
+
+    def test_rw_uniform_angles(self):
+        import scipy.stats
+
+        num_sites = NumSites(1000)
+        min_max_angles = (np.pi / 3, np.pi / 2)
+        path = hard_sphere_random_walk(
+            termination=num_sites,
+            radius=0.001,  # choose a point particle
+            bond_length=1,
+            rw_angles=min_max_angles,
+            trial_batch_size=1,
+        )
+        angles = []
+        for i, j, k in zip(
+            path.coordinates, path.coordinates[1:], path.coordinates[2:]
+        ):
+            BA = i - j
+            BC = k - j
+            norm_BA = np.linalg.norm(BA)
+            norm_BC = np.linalg.norm(BC)
+            angles.append(np.arccos(np.dot(BA, BC) / (norm_BA * norm_BC)))
+        uniform_loc_scale = (min_max_angles[0], min_max_angles[1] - min_max_angles[0])
+        _, p_val = scipy.stats.kstest(angles, "uniform", args=uniform_loc_scale)
+        assert p_val > 0.05
+        assert np.isclose(np.mean(angles), np.pi * 5 / 12, atol=1e-1)
+
+    @pytest.mark.parametrize("loc", [0.0, -2.0])
+    def test_rw_dihedrals_normal(self, loc):
+        path = self._dihedral_walk({"loc": loc, "scale": 0.3})
+        thetas, phis = _chain_geometry(_unwrapped_chains(path)[0])
+        mean, std = _circular_mean_std(phis)
+        assert abs(_angle_diff(mean, loc)) < 0.06
+        assert np.isclose(std, 0.3, atol=0.05)
+        assert np.isclose(thetas.mean(), 1.95, atol=0.03)
+
+    def test_rw_dihedrals_pbc(self):
+        # A small box, so that many bonds cross a periodic boundary.
+        L = 2.5
+        box = CuboidConstraint(Lx=L, Ly=L, Lz=L, pbc=(True, True, True))
+        path = self._dihedral_walk({"loc": np.pi, "scale": 0.3}, box=box, n_sites=300)
+        chain = _unwrapped_chains(path, box_lengths=np.full(3, L))[0]
+        bonds = np.linalg.norm(np.diff(chain, axis=0), axis=1)
+        assert np.allclose(bonds, 0.25, atol=1e-4)
+        thetas, phis = _chain_geometry(chain)
+        mean, std = _circular_mean_std(phis)
+        assert abs(_angle_diff(mean, np.pi)) < 0.06
+        assert np.isclose(std, 0.3, atol=0.05)
+        assert np.isclose(thetas.mean(), 1.95, atol=0.03)
+
+    def test_rw_dihedrals_multiple_chains(self):
+        # When several chains share one Path, the dihedral sampler must only
+        # use sites from the chain being grown, never the previous chain's.
+        n_chains, n_sites = 30, 6
+        path = self._dihedral_walk(
+            {"loc": np.pi / 2, "scale": 0.05}, n_chains=n_chains, n_sites=n_sites
+        )
+        chains = _unwrapped_chains(path)
+        assert len(chains) == n_chains
+        own = np.concatenate([_chain_geometry(c)[1] for c in chains])
+        assert abs(_angle_diff(_circular_mean_std(own)[0], np.pi / 2)) < 0.05
+        # Dihedrals from each chain's last site into the next chain's first
+        # three sites should be random, not follow the sampler.
+        xyz = np.asarray(path.coordinates, dtype=float)
+        between = [
+            _dihedral(*xyz[k * n_sites - 1 : k * n_sites + 3])
+            for k in range(1, n_chains)
+        ]
+        assert _circular_mean_std(between)[1] > 1.0

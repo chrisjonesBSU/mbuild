@@ -392,7 +392,11 @@ def angle_table_from_sampler(sampler, n_bins=100, jacobian=True, n_samples=500_0
         Number of evenly spaced theta points from 0 to pi.
     jacobian : bool, default True
         Divide the sampled density by sin(theta) before inverting, so that an
-        MD angle distribution reproduces the sampled one.
+        MD angle distribution reproduces the sampled one. Keep this True for
+        bond angles: a bond angle's observed distribution is
+        exp(-U/kT) * sin(theta), and without the division the potential comes
+        out wrong by -kT * ln(sin(theta)). For dihedrals use
+        :func:`dihedral_table_from_sampler`, which applies no such factor.
     n_samples : int, default 500000
         Number of angles drawn to estimate the distribution.
 
@@ -439,6 +443,10 @@ def angle_table_from_sampler(sampler, n_bins=100, jacobian=True, n_samples=500_0
 def dihedral_table_from_sampler(sampler, n_bins=100, n_samples=500_000):
     """Boltzmann-invert a dihedral-angle sampler into a tabulated potential.
     The Boltzmann-inversion assumes kT = 1.0
+
+    Unlike :func:`angle_table_from_sampler`, there is no sin factor to divide
+    out: the dihedral has uniform measure over [-pi, pi], so
+    U(phi) = -kT * ln(P(phi)).
 
     Parameters
     ----------
