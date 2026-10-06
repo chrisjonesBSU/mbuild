@@ -23,7 +23,7 @@ from mbuild.compound import Compound
 
 from .convert import _sorted_components, to_cgsmiles_graph
 from .fragments import compound_to_fragment_graph
-from .placement import generate_positions
+from .placement import generate_positions, minimum_image
 
 __all__ = ["resolve", "backmap"]
 
@@ -218,6 +218,7 @@ def backmap(
     seed=42,
     check_bonding=True,
     all_atom=None,
+    box=None,
 ):
     """Backmap a coarse-grained system to an atomistic mbuild Compound.
 
@@ -295,6 +296,12 @@ def backmap(
         of the returned Compound is then a finer bead rather than an
         atom. Every fragment then needs a template to supply its local
         geometry, since there is no atomistic detail to embed.
+    box : mbuild.Box or array-like of shape (3,), optional
+        Periodic box of the CG system (orthorhombic). Defaults to
+        ``system.box`` for a ``Compound``; a ``Path`` has no box, so
+        pass one. Fragments stay centered on their (wrapped) beads and
+        are oriented toward bonded beads using the minimum image, so
+        bonds may cross the periodic boundary.
 
     Returns
     -------
@@ -353,6 +360,13 @@ def backmap(
     )
 
     bead_positions = nx.get_node_attributes(cg_graph, "position")
+    if box is None and isinstance(system, Compound):
+        box = system.box
+    box_lengths = None
+    if box is not None:
+        if hasattr(box, "angles") and not np.allclose(box.angles, 90.0):
+            raise ValueError("backmap only supports orthorhombic boxes.")
+        box_lengths = np.asarray(getattr(box, "lengths", box), dtype=float)
 
     # Anchor of each atom: mean position of the bead it descends from
     anchors = {}
@@ -363,7 +377,9 @@ def backmap(
                 f"Atom {node} does not trace back to any CG bead; "
                 "cannot assign a position."
             )
-        anchors[node] = np.mean([bead_positions[b] for b in beads], axis=0)
+        first = np.asarray(bead_positions[beads[0]], dtype=float)
+        offsets = [minimum_image(bead_positions[b] - first, box_lengths) for b in beads]
+        anchors[node] = first + np.mean(offsets, axis=0)
 
     positions = generate_positions(
         molecule=molecule,
@@ -373,6 +389,7 @@ def backmap(
         templates=templates,
         seed=seed,
         all_atom=all_atom,
+        box_lengths=box_lengths,
     )
 
     return _molecule_to_compound(cg_graph, molecule, node_to_beads, positions)
