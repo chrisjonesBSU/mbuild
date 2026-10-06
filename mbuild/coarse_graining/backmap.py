@@ -412,7 +412,10 @@ def _molecule_to_compound(cg_graph, molecule, node_to_beads, positions):
     for node in sorted(cg_graph.nodes):
         bead_compounds[node] = Compound(name=cg_graph.nodes[node]["beadname"])
 
+    # Collect children per parent and add each list in one call; adding one
+    # at a time recomposes the parent's bond graph on every call.
     particles = {}
+    bead_particles = {node: [] for node in bead_compounds}
     for node, data in molecule.nodes(data=True):
         symbol = data.get("element")
         try:
@@ -429,22 +432,34 @@ def _molecule_to_compound(cg_graph, molecule, node_to_beads, positions):
             charge=data.get("charge", 0) or None,
         )
         particles[node] = particle
-        bead_compounds[node_to_beads[node][0]].add(particle)
+        bead_particles[node_to_beads[node][0]].append(particle)
+
+    for bead_index, children in bead_particles.items():
+        if children:
+            bead_compounds[bead_index].add(children)
 
     components = _sorted_components(cg_graph)
     if len(components) == 1:
-        for bead_index in sorted(bead_compounds):
-            bead_compound = bead_compounds[bead_index]
-            if bead_compound.children:
-                root.add(bead_compound)
+        root.add(
+            [
+                bead_compounds[bead_index]
+                for bead_index in sorted(bead_compounds)
+                if bead_particles[bead_index]
+            ]
+        )
     else:
+        molecules = []
         for component in components:
             molecule_compound = Compound(name="Molecule")
-            for bead_index in component:
-                bead_compound = bead_compounds[bead_index]
-                if bead_compound.children:
-                    molecule_compound.add(bead_compound)
-            root.add(molecule_compound, label="Molecule[$]")
+            molecule_compound.add(
+                [
+                    bead_compounds[bead_index]
+                    for bead_index in component
+                    if bead_particles[bead_index]
+                ]
+            )
+            molecules.append(molecule_compound)
+        root.add(molecules, label=["Molecule[$]"] * len(molecules))
 
     for u, v, data in molecule.edges(data=True):
         root.add_bond((particles[u], particles[v]), bond_order=float(data["order"]))
