@@ -516,6 +516,78 @@ class TestHoomdSimulation(BaseTest):
         assert _auto_bond_lengths(frame)["A-A"] == pytest.approx(0.25)
         assert _auto_radii(frame)["A"] == pytest.approx(0.25 / 0.97)
 
+    def test_dihedral_table_wraps_samples(self):
+        """Samples past +/-pi wrap around instead of piling up at the edge."""
+        from mbuild.path.points import AnglesSampler
+        from mbuild.utils.simulation.path_forces import (
+            dihedral_table_from_sampler,
+        )
+
+        sampler = AnglesSampler("normal", {"loc": np.pi, "scale": 0.3})
+        phi, U, _ = dihedral_table_from_sampler(sampler)
+        assert U[0] == pytest.approx(U[-1], abs=0.2)
+        assert U[0] < 0.2
+        assert U[np.argmin(np.abs(phi))] > 10
+
+    @pytest.mark.skipif(not has_hoomd, reason="hoomd is not installed")
+    def test_path_dihedrals_md(self):
+        """MD with the path forcefield keeps the walk's dihedral distribution."""
+        from mbuild.path import hard_sphere_random_walk
+        from mbuild.path.points import AnglesSampler
+        from mbuild.utils.simulation.path_forces import PathForcefield
+
+        angles = AnglesSampler("normal", {"loc": np.radians(112), "scale": 0.08})
+        dihedrals = AnglesSampler("normal", {"loc": np.pi / 3, "scale": 0.35})
+        path = hard_sphere_random_walk(
+            termination=100,
+            bond_length=1.0,
+            radius=0.9,
+            rw_angles=angles,
+            rw_dihedrals=dihedrals,
+            seed=3,
+        )
+        pff = PathForcefield(
+            radius=1.0, bond_length=1.0, angles=angles, dihedrals=dihedrals
+        )
+        sim = HoomdSimulation(path, forcefield=pff, run_on_gpu=False, seed=2)
+        assert isinstance(sim.forces[-1], hoomd.md.dihedral.Table)
+        L = np.asarray(sim.state.box.L)
+        phis = []
+        for _ in range(10):
+            sim.nvt(
+                n_steps=2000,
+                kT=1.0,
+                dt=0.002,
+                tau=0.1,
+                thermostat=hoomd.md.methods.thermostats.Bussi,
+            )
+            bonds = np.diff(path.coordinates.astype(float), axis=0)
+            bonds -= np.round(bonds / L) * L
+            b1, b2, b3 = bonds[:-2], bonds[1:-1], bonds[2:]
+            n1, n2 = np.cross(b1, b2), np.cross(b2, b3)
+            y = np.linalg.norm(b2, axis=1) * (b1 * n2).sum(axis=1)
+            phis.append(np.arctan2(y, (n1 * n2).sum(axis=1)))
+        z = np.mean(np.exp(1j * np.concatenate(phis[2:])))
+        assert np.angle(z) == pytest.approx(np.pi / 3, abs=0.1)
+        assert np.sqrt(-2 * np.log(np.abs(z))) == pytest.approx(0.35, abs=0.07)
+
+    @pytest.mark.skipif(not has_hoomd, reason="hoomd is not installed")
+    def test_relax_path_dihedrals(self):
+        from mbuild.path import hard_sphere_random_walk
+        from mbuild.path.points import AnglesSampler
+
+        dihedrals = AnglesSampler("normal", {"loc": np.pi, "scale": 0.3})
+        path = hard_sphere_random_walk(
+            termination=30,
+            bond_length=1.0,
+            radius=0.9,
+            rw_dihedrals=dihedrals,
+            seed=1,
+        )
+        old_coords = path.coordinates.copy()
+        path.relax(bead_radius=1.0, bond_length=1.0, dihedrals_sampler=dihedrals)
+        assert not np.allclose(old_coords, path.coordinates)
+
     @pytest.mark.skipif(not has_hoomd, reason="hoomd is not installed")
     def test_stress_uff(self):
         """UFF on a 60-atom molecule spanning all 10 elements and every hybridization."""

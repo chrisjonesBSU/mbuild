@@ -458,6 +458,7 @@ class Path:
         btype="harmonic",
         bond_length=None,
         angles_sampler=None,
+        dihedrals_sampler=None,
         steps=1000,
         seed=1,
         run_on_gpu=False,
@@ -482,6 +483,11 @@ class Path:
         angles_sampler : mbuild.path.points.AnglesSampler or dict, optional
             If given, adds a tabulated angle potential. A dict keyed by a
             bead-type triple parameterizes angles per type.
+        dihedrals_sampler : mbuild.path.points.AnglesSampler or dict, optional
+            If given, adds a tabulated dihedral potential. A dict keyed by a
+            dihedral-type name parameterizes dihedrals per type. Both samplers
+            also accept the forms used by rw_angles and rw_dihedrals in
+            hard_sphere_random_walk.
         steps : int, optional, default 1,000
             Number of FIRE minimization steps.
         seed : int, optional, default 1
@@ -509,6 +515,7 @@ class Path:
             bond_length=bond_length,
             btype=btype,
             angles=angles_sampler,
+            dihedrals=dihedrals_sampler,
         )
         sim = mbuild.simulation.HoomdSimulation(
             self, forcefield=forcefield, seed=seed, run_on_gpu=run_on_gpu
@@ -1268,6 +1275,7 @@ def hard_sphere_random_walk(
     bond_length=0.15,
     radius=0.1,
     rw_angles=None,
+    rw_dihedrals=None,
     termination=None,
     volume_constraint=None,
     bias=None,
@@ -1302,6 +1310,16 @@ def hard_sphere_random_walk(
         use a Gaussian distribution by passing a dict with keys {'loc':mean, 'scale':std}.
         Finally, a numpy array of 1D or 2D array of numpy values can be passed, which will be sampled
         via numpy.random.choice method. The 2D case provides a set of weights.
+    rw_dihedrals : tuple or dict or np.array or AnglesSampler, default None
+        Set the dihedral angle sampling method, using the same forms as ``rw_angles``.
+        Dihedrals use the IUPAC convention (cis is 0, trans is pi, gauche is about
+        +/- pi/3), which matches HOOMD. The default value of None places each new
+        site at a uniform random dihedral. Dihedrals are applied once three bonded
+        sites precede the new site. Discrete states, such as trans and gauche, must
+        be passed as an array, since a two element tuple or list is read as a
+        (low, high) range, and a range cannot wrap across +/-pi. To sample from a
+        torsion potential U(phi), pass a 2D array of a phi grid and weights
+        exp(-U/kT).
     termination : termination condition, required
         Termination condition for the random walk. If an integer is passed,
         will terminate after reaching that number of sites. Can also pass a tuple of
@@ -1342,6 +1360,7 @@ def hard_sphere_random_walk(
         bond_length=bond_length,
         radius=radius,
         angles_sampler=rw_angles,
+        dihedrals_sampler=rw_dihedrals,
         bead_name=bead_name,
         initial_point=initial_point,
         previous_count=previous_count,
@@ -1489,7 +1508,7 @@ def hard_sphere_random_walk(
             delta[pbc] -= np.round(delta[pbc] / box_lengths[pbc]) * box_lengths[pbc]
             pos2 = pos1 + delta
         dihedral_sites = None
-        if state.angles.dihedrals is not None:
+        if state.dihedrals is not None:
             pos0_index = state.dihedral_site_index()
             if pos0_index is not None:
                 pos0 = coordinates[pos0_index]
@@ -1626,6 +1645,10 @@ class RandomWalkState:
         Minimum angle (radians) for selecting next step
     max_angle : float
         Maximum angle (radians) for selecting next step
+    angles : AnglesSampler
+        Sampler for bond angles
+    dihedrals : AnglesSampler or None
+        Sampler for dihedral angles, or None for a uniform random dihedral
     count : int
         Current number of successfully placed sites
     init_count : int
@@ -1660,6 +1683,7 @@ class RandomWalkState:
         radius,
         angles_sampler,
         bead_name,
+        dihedrals_sampler=None,
         initial_point=None,
         previous_count=0,
         connectivity=None,
@@ -1680,51 +1704,14 @@ class RandomWalkState:
         if rng is None:
             rng = np.random.default_rng(seed + previous_count)
         self.rng = rng
-        # Multiple ways to handle angles_sampler arg:
         if angles_sampler is None:
-            self.angles = AnglesSampler(
-                "uniform", {"low": np.pi / 2, "high": np.pi}, rng=self.rng
-            )
-        # Pass in a tupe or list of (low, high)
-        elif isinstance(angles_sampler, (tuple, list)) and len(angles_sampler) == 2:
-            self.angles = AnglesSampler(
-                "uniform",
-                {"low": angles_sampler[0], "high": angles_sampler[1]},
-                rng=self.rng,
-            )
-        # Pass in a dict with supported kwargs
-        elif isinstance(angles_sampler, dict):
-            if "loc" in angles_sampler and "scale" in angles_sampler:
-                self.angles = AnglesSampler("normal", angles_sampler, rng=self.rng)
-            elif "low" in angles_sampler and "high" in angles_sampler:
-                self.angles = AnglesSampler("uniform", angles_sampler, rng=self.rng)
-            else:
-                raise ValueError(
-                    f"kwargs {angles_sampler} cannot be used to create an "
-                    "AnglesSampler. Pass either {'loc': mean, 'scale': std} for "
-                    "a normal distribution, or {'low': min, 'high': max} for a "
-                    "uniform distribution."
-                )
-        # Pass in an array of choices
-        elif isinstance(angles_sampler, np.ndarray):
-            if angles_sampler.ndim == 1:
-                kwargs = {"a": angles_sampler}
-            elif angles_sampler.ndim == 2:
-                kwargs = {"a": angles_sampler[0], "p": angles_sampler[1]}
-            else:
-                raise ValueError(
-                    "Sampling angles from an array of choices is only supported for 1D and 2D arrays."
-                )
-            self.angles = AnglesSampler("choice", kwargs, rng=self.rng)
-        # Pass in an AnglesSampler instance.
-        elif isinstance(angles_sampler, AnglesSampler):
-            self.angles = angles_sampler
-            self.angles.rng = self.rng
-        else:
-            raise ValueError(
-                f"{angles_sampler} is not a supported form to sample angles. "
-                "See mbuild.path.points.AnglesSampler."
-            )
+            angles_sampler = (np.pi / 2, np.pi)
+        self.angles = AnglesSampler.coerce(angles_sampler, self.rng)
+        self.dihedrals = (
+            None
+            if dihedrals_sampler is None
+            else AnglesSampler.coerce(dihedrals_sampler, self.rng)
+        )
         self.bead_name = bead_name
         self.initial_point, self.starting_from_site = _normalize_initial_point(
             initial_point

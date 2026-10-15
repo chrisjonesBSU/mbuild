@@ -284,58 +284,37 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
 
 
 class AnglesSampler:
-    """Sample bond angles, and optionally dihedral angles, for a random walk.
+    """Sample angles (radians) from a numpy distribution.
 
-    Parameters
-    ----------
-    distributionStr : str
-        The numpy Generator method used to sample bond angles (radians):
-        "uniform", "normal" or "choice".
-    kwargs : dict
-        Keyword arguments for that method.
-    rng : np.random.Generator, optional
-        Random number generator. A random walk replaces it with its own.
-    dihedrals : AnglesSampler, optional
-        Sampler for the dihedral angle (radians) formed by the new site and
-        the three sites before it, using the IUPAC convention (trans is pi,
-        gauche is about +-pi/3). When None (default), the new site is placed at
-        a uniform random azimuth around the last bond. Dihedrals are applied
-        once three bonded sites precede the new site.
+    Used for both bond angles and dihedral angles in a random walk.
 
-    Notes
+    NOTES
     -----
     "uniform" distribution should use 'low' and 'high' as kwargs.
     "normal" distribution should use 'loc' and 'scale' as kwargs.
     "choice" distribution should use 'a' and optionally 'p' as kwargs.
-
-    Examples
-    --------
-    Trans and gauche states with 60/40 trans/gauche populations:
-
-    >>> dihedrals = AnglesSampler(
-    ...     "choice", {"a": [np.pi, np.pi / 3, -np.pi / 3], "p": [0.6, 0.2, 0.2]}
-    ... )
-    >>> sampler = AnglesSampler("normal", {"loc": 1.98, "scale": 0.05}, dihedrals=dihedrals)
     """
 
-    def __init__(self, distributionStr, kwargs, rng=None, dihedrals=None):
-        if dihedrals is not None and not isinstance(dihedrals, AnglesSampler):
-            raise TypeError(
-                f"dihedrals must be an AnglesSampler or None, not {type(dihedrals)}."
-            )
-        if dihedrals is not None and dihedrals.dihedrals is not None:
-            raise ValueError("The dihedrals sampler cannot have its own dihedrals.")
-        self.dihedrals = dihedrals
+    def __init__(self, distributionStr, kwargs, rng=None):
         self.rng = rng if rng is not None else np.random.default_rng()
         distribution = distributionStr.lower()
         if distribution == "uniform":
             assert "low" in kwargs
             assert "high" in kwargs
+            if np.any(np.asarray(kwargs["low"]) > np.asarray(kwargs["high"])):
+                raise ValueError(
+                    f"Uniform range low={kwargs['low']} is greater than "
+                    f"high={kwargs['high']}. A range cannot wrap across +/-pi, and "
+                    "discrete values must be passed as a numpy array."
+                )
         elif distribution == "normal":
             assert "loc" in kwargs
             assert "scale" in kwargs
         elif distribution == "choice":
             assert "a" in kwargs  # p is not required
+            if kwargs.get("p") is not None:
+                p = np.asarray(kwargs["p"], dtype=float)
+                kwargs = {**kwargs, "p": p / p.sum()}
         else:
             raise NotImplementedError(
                 f"Sample Distribution {distributionStr} not supported."
@@ -343,16 +322,53 @@ class AnglesSampler:
         self.distribution = distribution
         self.kwargs = kwargs
 
-    @property
-    def rng(self):
-        return self._rng
+    @classmethod
+    def coerce(cls, value, rng=None):
+        """Build an AnglesSampler from the forms accepted by rw_angles and rw_dihedrals.
 
-    @rng.setter
-    def rng(self, rng):
-        # The dihedrals sampler shares the rng so one seed drives the walk.
-        self._rng = rng
-        if self.dihedrals is not None:
-            self.dihedrals.rng = rng
+        A (low, high) tuple or list gives a uniform distribution, a dict with
+        'loc' and 'scale' or 'low' and 'high' gives a normal or uniform
+        distribution, and a 1D array of values (or a 2D array whose rows are
+        values and weights, shape (2, N)) is sampled with numpy.random.choice.
+        Discrete values must be passed as an array, since a two element tuple
+        or list is read as a range. An AnglesSampler is returned as is, with
+        its rng replaced by rng when one is given.
+        """
+        if isinstance(value, AnglesSampler):
+            if rng is not None:
+                value.rng = rng
+            return value
+        if isinstance(value, (tuple, list)) and len(value) == 2:
+            return cls("uniform", {"low": value[0], "high": value[1]}, rng=rng)
+        if isinstance(value, dict):
+            if "loc" in value and "scale" in value:
+                return cls("normal", value, rng=rng)
+            if "low" in value and "high" in value:
+                return cls("uniform", value, rng=rng)
+            raise ValueError(
+                f"kwargs {value} cannot be used to create an "
+                "AnglesSampler. Pass either {'loc': mean, 'scale': std} for "
+                "a normal distribution, or {'low': min, 'high': max} for a "
+                "uniform distribution."
+            )
+        if isinstance(value, np.ndarray):
+            if value.ndim == 1:
+                return cls("choice", {"a": value}, rng=rng)
+            if value.ndim == 2:
+                if value.shape[0] != 2:
+                    raise ValueError(
+                        f"A 2D array of choices must have shape (2, N), with "
+                        f"values in the first row and weights in the second, "
+                        f"not {value.shape}. Try passing its transpose."
+                    )
+                return cls("choice", {"a": value[0], "p": value[1]}, rng=rng)
+            raise ValueError(
+                "Sampling angles from an array of choices is only supported for 1D and 2D arrays."
+            )
+        raise ValueError(
+            f"{value} is not a supported form to sample angles. "
+            "See mbuild.path.points.AnglesSampler."
+        )
 
     def sample(self, size=None):
         # Resolve against self.rng at call time so the rng can be swapped in.
@@ -405,16 +421,15 @@ def generate_trials(state, dihedral_sites=None):
     Parameters
     ----------
     state : RandomWalkState
-        The random walk state, which holds the angles sampler and the rng.
+        The random walk state, which holds the angle samplers and the rng.
     dihedral_sites : np.ndarray, shape (3, 3), optional
         The three sites before the new site in bonded order, oldest first and
-        unwrapped. Used only when the angles sampler has a dihedrals sampler;
-        otherwise, or when None, trial vectors have a uniform random azimuth.
+        unwrapped. Used only when the walk has a dihedrals sampler; otherwise,
+        or when None, trial vectors have a uniform random azimuth.
     """
     thetas = state.angles.sample(size=state.trial_batch_size).astype(np.float32)
-    dihedrals = state.angles.dihedrals
-    if dihedrals is not None and dihedral_sites is not None:
-        phis = dihedrals.sample(size=state.trial_batch_size)
+    if state.dihedrals is not None and dihedral_sites is not None:
+        phis = state.dihedrals.sample(size=state.trial_batch_size)
         r = dihedral_vectors(dihedral_sites, phis)
         if r is not None:
             return thetas, r

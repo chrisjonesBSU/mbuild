@@ -310,14 +310,36 @@ def _resolve_param(value, type_names, label, auto_fn):
 def _resolve_sampler(sampler, type_names):
     """Resolve a sampler (or dict of them) to a {type_name: sampler} dict, or None.
 
-    A single sampler broadcasts to every type; a dict is used as given (keyed
-    by type name) and may cover only the types it should act on.
+    A single sampler broadcasts to every type; a dict keyed by type name may
+    cover only the types it should act on. A sampler may be any object with a
+    sample(size) method, or any form accepted by rw_angles and rw_dihedrals
+    (see mbuild.path.points.AnglesSampler.coerce), including a dict of
+    distribution kwargs such as {"loc": mean, "scale": std}.
     """
-    if sampler is None:
+    if sampler is None or not type_names:
         return None
-    if isinstance(sampler, dict):
-        return {t: sampler[t] for t in type_names if t in sampler} or None
+    is_distribution = isinstance(sampler, dict) and (
+        {"loc", "scale"} <= sampler.keys() or {"low", "high"} <= sampler.keys()
+    )
+    if isinstance(sampler, dict) and not is_distribution:
+        resolved = {t: _coerce_sampler(sampler[t]) for t in type_names if t in sampler}
+        if not resolved:
+            raise ValueError(
+                f"None of the sampler keys {list(sampler)} match the system's "
+                f"types {type_names}."
+            )
+        return resolved
+    sampler = _coerce_sampler(sampler)
     return {t: sampler for t in type_names}
+
+
+def _coerce_sampler(sampler):
+    """Return sampler if it has a sample method, else build an AnglesSampler from it."""
+    if hasattr(sampler, "sample"):
+        return sampler
+    from mbuild.path.points import AnglesSampler
+
+    return AnglesSampler.coerce(sampler)
 
 
 def _bond_lengths(snap):
@@ -443,7 +465,8 @@ def dihedral_table_from_sampler(sampler, n_bins=100, n_samples=500_000):
     Parameters
     ----------
     sampler : object with a sample(size) method
-        Provides sampled dihedral angles (radians) in [-pi, pi].
+        Provides sampled dihedral angles (radians, IUPAC convention with trans
+        at pi). Samples outside [-pi, pi] are wrapped into it.
     n_bins : int, default 100
         Number of evenly spaced phi points from -pi to pi.
     n_samples : int, default 500000
@@ -456,9 +479,8 @@ def dihedral_table_from_sampler(sampler, n_bins=100, n_samples=500_000):
         length n_bins, ready for hoomd.md.dihedral.Table.
     """
     phi = np.linspace(-math.pi, math.pi, n_bins)
-    samples = np.clip(
-        np.asarray(sampler.sample(size=n_samples), dtype=float), -math.pi, math.pi
-    )
+    samples = np.asarray(sampler.sample(size=n_samples), dtype=float)
+    samples = np.mod(samples + math.pi, 2 * math.pi) - math.pi
     density, edges = np.histogram(
         samples, bins=n_bins, range=(-math.pi, math.pi), density=True
     )
