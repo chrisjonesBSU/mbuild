@@ -1480,7 +1480,6 @@ def hard_sphere_random_walk(
     # Main random walk loop
     walk_finished = False
     while not walk_finished:
-        batch_angles, batch_vectors = generate_trials(state)
         pos1 = coordinates[state.count - 1]
         pos2 = coordinates[state.count - 2]
         if any(pbc):
@@ -1489,6 +1488,19 @@ def hard_sphere_random_walk(
             delta = pos2 - pos1
             delta[pbc] -= np.round(delta[pbc] / box_lengths[pbc]) * box_lengths[pbc]
             pos2 = pos1 + delta
+        dihedral_sites = None
+        if state.angles.dihedrals is not None:
+            pos0_index = state.dihedral_site_index()
+            if pos0_index is not None:
+                pos0 = coordinates[pos0_index]
+                if any(pbc):
+                    delta = pos0 - pos2
+                    delta[pbc] -= (
+                        np.round(delta[pbc] / box_lengths[pbc]) * box_lengths[pbc]
+                    )
+                    pos0 = pos2 + delta
+                dihedral_sites = np.array([pos0, pos2, pos1])
+        batch_angles, batch_vectors = generate_trials(state, dihedral_sites)
         candidates = next_step(
             pos1=pos1,
             pos2=pos2,
@@ -1773,6 +1785,21 @@ class RandomWalkState:
             return self._no_excluded
         self._excluded_buffer[0] = attach_index
         return self._excluded_buffer
+
+    def dihedral_site_index(self):
+        """Return the index of the site three bonds back from the next site.
+
+        That site, with the last two sites, sets the dihedral of the next
+        site. It is a site of this walk once the walk has three sites, or the
+        attach site when this walk links to an existing path and has two.
+        Returns None when no such bonded site exists yet.
+        """
+        n_walk = self.count - self.previous_count
+        if n_walk >= 3:
+            return self.count - 3
+        if n_walk == 2 and self.attach_index >= 0:
+            return self.attach_index
+        return None
 
     def clean_termination(self):
         """Clean attached termination checks, check states before cleaning and clean before exiting hsrw."""

@@ -284,16 +284,48 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
 
 
 class AnglesSampler:
-    """
-    TODO:Allow for passing a specific 2D weighted pre-defined sample, as opposed to a numpy distribution.
-    This would use np.random.choice instead as the sample method.
-    NOTES
+    """Sample bond angles, and optionally dihedral angles, for a random walk.
+
+    Parameters
+    ----------
+    distributionStr : str
+        The numpy Generator method used to sample bond angles (radians):
+        "uniform", "normal" or "choice".
+    kwargs : dict
+        Keyword arguments for that method.
+    rng : np.random.Generator, optional
+        Random number generator. A random walk replaces it with its own.
+    dihedrals : AnglesSampler, optional
+        Sampler for the dihedral angle (radians) formed by the new site and
+        the three sites before it, using the IUPAC convention (trans is pi,
+        gauche is about +-pi/3). When None (default), the new site is placed at
+        a uniform random azimuth around the last bond. Dihedrals are applied
+        once three bonded sites precede the new site.
+
+    Notes
     -----
     "uniform" distribution should use 'low' and 'high' as kwargs.
     "normal" distribution should use 'loc' and 'scale' as kwargs.
+    "choice" distribution should use 'a' and optionally 'p' as kwargs.
+
+    Examples
+    --------
+    Trans and gauche states with 60/40 trans/gauche populations:
+
+    >>> dihedrals = AnglesSampler(
+    ...     "choice", {"a": [np.pi, np.pi / 3, -np.pi / 3], "p": [0.6, 0.2, 0.2]}
+    ... )
+    >>> sampler = AnglesSampler("normal", {"loc": 1.98, "scale": 0.05}, dihedrals=dihedrals)
     """
 
-    def __init__(self, distributionStr, kwargs, rng=None):
+    def __init__(self, distributionStr, kwargs, rng=None, dihedrals=None):
+        if dihedrals is not None and not isinstance(dihedrals, AnglesSampler):
+            raise TypeError(
+                f"dihedrals must be an AnglesSampler or None, not {type(dihedrals)}."
+            )
+        if dihedrals is not None and dihedrals.dihedrals is not None:
+            raise ValueError("The dihedrals sampler cannot have its own dihedrals.")
+        self.dihedrals = dihedrals
         self.rng = rng if rng is not None else np.random.default_rng()
         distribution = distributionStr.lower()
         if distribution == "uniform":
@@ -311,14 +343,81 @@ class AnglesSampler:
         self.distribution = distribution
         self.kwargs = kwargs
 
+    @property
+    def rng(self):
+        return self._rng
+
+    @rng.setter
+    def rng(self, rng):
+        # The dihedrals sampler shares the rng so one seed drives the walk.
+        self._rng = rng
+        if self.dihedrals is not None:
+            self.dihedrals.rng = rng
+
     def sample(self, size=None):
         # Resolve against self.rng at call time so the rng can be swapped in.
         return getattr(self.rng, self.distribution)(size=size, **self.kwargs)
 
 
-def generate_trials(state):
-    """Use normal or uniform sampling on angles, isotropic trial vectors."""
+def dihedral_vectors(sites, phis):
+    """Return unit vectors that place a new site at the given dihedrals.
+
+    The vectors are perpendicular to the last bond, ``sites[2] - sites[1]``.
+    A new site placed off ``sites[2]`` along the last bond direction rotated
+    toward one of these vectors forms the dihedral ``phi`` with ``sites``,
+    whatever the bond angle.
+
+    Parameters
+    ----------
+    sites : np.ndarray, shape (3, 3)
+        The three sites before the new site in bonded order, oldest first,
+        unwrapped so that consecutive sites are a bond apart.
+    phis : np.ndarray, shape (N,)
+        Dihedral angles in radians (IUPAC convention, trans is pi).
+
+    Returns
+    -------
+    np.ndarray, shape (N, 3) or None
+        The vectors, or None if the three sites are collinear and the
+        dihedral is undefined.
+    """
+    sites = np.asarray(sites, dtype=np.float64)
+    axis = sites[2] - sites[1]
+    axis /= np.linalg.norm(axis)
+    # Component of the first bond perpendicular to the last bond, pointing
+    # from the axis toward the oldest site: the cis direction (phi = 0).
+    cis = sites[0] - sites[1]
+    cis -= np.dot(cis, axis) * axis
+    cis_norm = np.linalg.norm(cis)
+    if cis_norm < 1e-6:
+        return None
+    cis /= cis_norm
+    side = np.cross(axis, cis)
+    phis = np.asarray(phis, dtype=np.float64)
+    return (np.cos(phis)[:, None] * cis + np.sin(phis)[:, None] * side).astype(
+        np.float32
+    )
+
+
+def generate_trials(state, dihedral_sites=None):
+    """Sample trial bond angles and the trial vectors that orient them.
+
+    Parameters
+    ----------
+    state : RandomWalkState
+        The random walk state, which holds the angles sampler and the rng.
+    dihedral_sites : np.ndarray, shape (3, 3), optional
+        The three sites before the new site in bonded order, oldest first and
+        unwrapped. Used only when the angles sampler has a dihedrals sampler;
+        otherwise, or when None, trial vectors have a uniform random azimuth.
+    """
     thetas = state.angles.sample(size=state.trial_batch_size).astype(np.float32)
+    dihedrals = state.angles.dihedrals
+    if dihedrals is not None and dihedral_sites is not None:
+        phis = dihedrals.sample(size=state.trial_batch_size)
+        r = dihedral_vectors(dihedral_sites, phis)
+        if r is not None:
+            return thetas, r
     # Only the direction of r is used; normal sampling is isotropic, giving a
     # uniform azimuth around the chain direction.
     r = state.rng.normal(size=(state.trial_batch_size, 3)).astype(np.float32)

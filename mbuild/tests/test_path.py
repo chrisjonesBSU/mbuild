@@ -36,6 +36,28 @@ from mbuild.tests.base_test import BaseTest
 from mbuild.utils.geometry import bounding_box
 
 
+def _signed_dihedrals(coords, box_lengths=None):
+    """IUPAC dihedrals (radians, trans is pi) along a linear chain of sites.
+
+    With box_lengths, bond vectors use the minimum image, so wrapped
+    coordinates from a periodic walk give the unwrapped dihedrals.
+    """
+    bonds = np.diff(np.asarray(coords, dtype=float), axis=0)
+    if box_lengths is not None:
+        box_lengths = np.asarray(box_lengths, dtype=float)
+        bonds -= np.round(bonds / box_lengths) * box_lengths
+    b1, b2, b3 = bonds[:-2], bonds[1:-1], bonds[2:]
+    n1, n2 = np.cross(b1, b2), np.cross(b2, b3)
+    y = np.linalg.norm(b2, axis=1) * (b1 * n2).sum(axis=1)
+    x = (n1 * n2).sum(axis=1)
+    return np.arctan2(y, x)
+
+
+def _angle_difference(a, b):
+    """Smallest absolute difference between angles, in radians."""
+    return np.abs(np.angle(np.exp(1j * (np.asarray(a) - np.asarray(b)))))
+
+
 class TestPaths(BaseTest):
     def test_from_coordinates(self):
         coords = np.random.uniform(-5, 5, size=(20, 3))
@@ -543,6 +565,125 @@ class TestRandomWalk(BaseTest):
             **kwargs,
         )
         assert np.allclose(path1.coordinates, path2.coordinates, atol=1e-7)
+
+    @pytest.mark.parametrize("phi", [np.pi, np.pi / 3, -np.pi / 3, 1.0])
+    def test_rw_dihedrals_fixed(self, phi):
+        """Every dihedral of a walk with a single dihedral value equals it."""
+        theta = np.radians(114)
+        sampler = AnglesSampler(
+            "choice", {"a": [theta]}, dihedrals=AnglesSampler("choice", {"a": [phi]})
+        )
+        path = hard_sphere_random_walk(
+            termination=Termination([NumSites(40), NumAttempts(1e4)]),
+            bond_length=0.154,
+            radius=0.05,
+            rw_angles=sampler,
+            seed=7,
+        )
+        assert len(path.coordinates) == 40
+        dihedrals = _signed_dihedrals(path.coordinates)
+        assert np.all(_angle_difference(dihedrals, phi) < 1e-3)
+
+    def test_rw_dihedrals_off_by_default(self):
+        """Without a dihedrals sampler the walk samples a range of dihedrals."""
+        path = hard_sphere_random_walk(
+            termination=Termination([NumSites(200), NumAttempts(1e4)]),
+            bond_length=0.154,
+            radius=0.05,
+            rw_angles=AnglesSampler("choice", {"a": [np.radians(114)]}),
+            seed=7,
+        )
+        dihedrals = _signed_dihedrals(path.coordinates)
+        assert dihedrals.min() < -2.5 and dihedrals.max() > 2.5
+        assert np.abs(dihedrals).min() < 0.5
+
+    def test_rw_dihedrals_periodic(self):
+        """Dihedrals hold for bonds that cross the faces of a periodic box."""
+        L = 2.0
+        box = CuboidConstraint(Lx=L, Ly=L, Lz=L, pbc=(True, True, True))
+        sampler = AnglesSampler(
+            "choice",
+            {"a": [np.radians(114)]},
+            dihedrals=AnglesSampler("choice", {"a": [np.pi]}),
+        )
+        path = hard_sphere_random_walk(
+            termination=Termination([NumSites(60), NumAttempts(1e4)]),
+            bond_length=0.154,
+            radius=0.05,
+            rw_angles=sampler,
+            volume_constraint=box,
+            seed=2,
+        )
+        coords = path.coordinates
+        assert len(coords) == 60
+        bonds = np.diff(coords, axis=0)
+        assert np.any(np.abs(bonds) > L / 2), "walk never crossed a box face"
+        dihedrals = _signed_dihedrals(coords, box_lengths=[L, L, L])
+        assert np.all(_angle_difference(dihedrals, np.pi) < 1e-3)
+
+    def test_rw_dihedrals_link_linear(self):
+        """A walk linked to a path sets its first dihedral from the attach site."""
+        phi = np.pi / 3
+        sampler = AnglesSampler(
+            "choice",
+            {"a": [np.radians(114)]},
+            dihedrals=AnglesSampler("choice", {"a": [phi]}),
+        )
+        path = Path(coordinates=np.array([[0.0, 0.0, 0.0]]))
+        hard_sphere_random_walk(
+            path=path,
+            termination=Termination([NumSites(10), NumAttempts(1e4)]),
+            bond_length=0.154,
+            radius=0.05,
+            rw_angles=sampler,
+            initial_point=0,
+            connectivity="link-linear",
+            seed=4,
+        )
+        # Site 0 is the attach site and site 1 the walk's first site.
+        coords = path.coordinates
+        assert path.bond_graph.has_edge(0, 1)
+        dihedrals = _signed_dihedrals(coords)
+        assert np.all(_angle_difference(dihedrals, phi) < 1e-3)
+
+    def test_rw_dihedrals_distribution(self):
+        """Sampled dihedral populations follow the given weights."""
+        weights = [0.6, 0.2, 0.2]
+        states = np.array([np.pi, np.pi / 3, -np.pi / 3])
+        sampler = AnglesSampler(
+            "choice",
+            {"a": [np.radians(114)]},
+            dihedrals=AnglesSampler("choice", {"a": states, "p": weights}),
+        )
+        path = hard_sphere_random_walk(
+            termination=Termination([NumSites(1000), NumAttempts(1e5)]),
+            bond_length=0.154,
+            radius=0.05,
+            rw_angles=sampler,
+            seed=11,
+        )
+        dihedrals = _signed_dihedrals(path.coordinates)
+        nearest = np.argmin(_angle_difference(dihedrals[:, None], states), axis=1)
+        assert np.all(_angle_difference(dihedrals, states[nearest]) < 1e-3)
+        fractions = np.bincount(nearest, minlength=3) / len(nearest)
+        assert np.allclose(fractions, weights, atol=0.05)
+
+    def test_rw_dihedrals_reproducible(self):
+        """Same-seed walks with a reused dihedrals sampler match."""
+        sampler = AnglesSampler(
+            "normal",
+            {"loc": 1.95, "scale": 0.05},
+            dihedrals=AnglesSampler("normal", {"loc": np.pi, "scale": 0.4}),
+        )
+        kwargs = dict(bond_length=0.154, radius=0.1, rw_angles=sampler, seed=14)
+        path1 = hard_sphere_random_walk(
+            termination=Termination([NumSites(50), NumAttempts(1e4)]), **kwargs
+        )
+        path2 = hard_sphere_random_walk(
+            termination=Termination([NumSites(50), NumAttempts(1e4)]), **kwargs
+        )
+        assert np.allclose(path1.coordinates, path2.coordinates, atol=1e-7)
+        assert sampler.dihedrals.rng is sampler.rng
 
     def test_seeds_random_namer(self):
         # An unseeded stochastic namer is driven by the walk's seed, so
@@ -1119,6 +1260,46 @@ class TestPathUtils(BaseTest):
             _, p_value = scipy.stats.normaltest(points)
 
         assert p_value > 0.05
+
+    def test_angles_sampler_bad_dihedrals(self):
+        with pytest.raises(TypeError):
+            AnglesSampler("uniform", {"low": 1, "high": 2}, dihedrals={"a": [np.pi]})
+        nested = AnglesSampler(
+            "choice", {"a": [np.pi]}, dihedrals=AnglesSampler("choice", {"a": [0.0]})
+        )
+        with pytest.raises(ValueError):
+            AnglesSampler("uniform", {"low": 1, "high": 2}, dihedrals=nested)
+
+    def test_dihedral_vectors(self):
+        from mbuild.path.path_utils import random_coordinate
+        from mbuild.path.points import dihedral_vectors
+
+        rng = np.random.default_rng(0)
+        sites = np.cumsum(rng.normal(size=(3, 3)), axis=0)
+        phis = np.linspace(-np.pi, np.pi, 13)
+        vectors = dihedral_vectors(sites, phis)
+        # Unit vectors perpendicular to the last bond.
+        axis = (sites[2] - sites[1]) / np.linalg.norm(sites[2] - sites[1])
+        assert np.allclose(np.linalg.norm(vectors, axis=1), 1, atol=1e-6)
+        assert np.allclose(vectors @ axis, 0, atol=1e-6)
+        for theta in (1.2, 1.9, 2.8):
+            new = random_coordinate(
+                pos1=sites[2],
+                pos2=sites[1],
+                bond_length=0.154,
+                thetas=np.full(len(phis), theta),
+                r_vectors=vectors,
+            )
+            dihedrals = np.array(
+                [_signed_dihedrals(np.vstack([sites, xyz]))[0] for xyz in new]
+            )
+            assert np.all(_angle_difference(dihedrals, phis) < 1e-4)
+
+    def test_dihedral_vectors_collinear(self):
+        from mbuild.path.points import dihedral_vectors
+
+        sites = np.array([[0.0, 0, 0], [0, 0, 1], [0, 0, 2]])
+        assert dihedral_vectors(sites, np.array([np.pi])) is None
 
     @pytest.mark.parametrize("axis", [0, 1, 2])
     def test_check_path_pbc_overlap_across_face(self, axis):
