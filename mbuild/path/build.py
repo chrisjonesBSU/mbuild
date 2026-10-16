@@ -1286,6 +1286,7 @@ def hard_sphere_random_walk(
     trial_batch_size=20,
     tolerance=1e-5,
     chunk_size=512,
+    exclusions=("1-2",),
 ):
     """Generates coordinates from a self avoiding random walk using
     fixed bond lengths, hard spheres, and minimum and maximum angles
@@ -1347,6 +1348,14 @@ def hard_sphere_random_walk(
         Tolerance used for rounding and checking for overlaps.
     chunk_size : int, default = 512
         Size of coordinate chunks to allocate
+    exclusions : str or tuple of str, default ("1-2",)
+        Bonded pairs left out of the overlap check: any of "1-2" (bonded
+        sites), "1-3" (sites two bonds apart) and "1-4" (sites three bonds
+        apart). Excluding "1-3" lets radius exceed the distance across a bond
+        angle, and excluding "1-4" lets it exceed the distance across a
+        dihedral, as for beads sized like real atoms. Bonds are followed
+        through the attach site into the existing path when connectivity is
+        "link-linear". Pass None to check every pair.
     """
     # Create seed sequence used by multiple path classes
     # The namer seed is separate, so that coordinates are impacted by naming methods.
@@ -1372,6 +1381,8 @@ def hard_sphere_random_walk(
         trial_batch_size=int(trial_batch_size),
         chunk_size=chunk_size,
         rng=rng,
+        exclusions=exclusions,
+        bond_graph=path.bond_graph if path is not None else None,
     )
     if path is None:  # Create empty path
         path = Path()
@@ -1675,6 +1686,9 @@ class RandomWalkState:
         Number of trial moves per step
     chunk_size : int
         Size of coordinate chunks to allocate
+    exclusions : tuple of int
+        Bond separations of the pairs left out of the overlap check, ascending
+        (1 for 1-2, 2 for 1-3, 3 for 1-4)
     """
 
     def __init__(
@@ -1696,6 +1710,8 @@ class RandomWalkState:
         trial_batch_size=20,
         chunk_size=512,
         rng=None,
+        exclusions=("1-2",),
+        bond_graph=None,
     ):
         self.bond_length = bond_length
         self.radius = radius
@@ -1740,11 +1756,31 @@ class RandomWalkState:
         self.bias = bias
         self.trial_batch_size = trial_batch_size
         self.chunk_size = chunk_size
-        check_angle_range(bond_length, radius, self.angles)
+        self.exclusions = _normalize_exclusions(exclusions)
+        if 1 not in self.exclusions and bond_length < radius - tolerance:
+            raise ValueError(
+                f"Without 1-2 exclusions, a {radius=} larger than {bond_length=} "
+                "overlaps every new site with the site it bonds to. Include "
+                "'1-2' in exclusions, reduce radius, or increase bond_length."
+            )
+        if 2 not in self.exclusions:
+            check_angle_range(bond_length, radius, self.angles)
 
         # State tracking
-        self._excluded_buffer = np.empty(1, dtype=np.int64)
+        # Offsets back from count of the sites excluded once this walk is
+        # longer than the largest excluded separation, descending so that
+        # count - offsets ascends as check_path requires.
+        self._walk_offsets = np.array(self.exclusions[::-1], dtype=np.int64)
+        self._excluded_buffer = np.empty(len(self.exclusions), dtype=np.int64)
         self._no_excluded = np.empty(0, dtype=np.int64)
+        # Sites of the existing path by bond distance from the attach site,
+        # for exclusions that reach past the start of a linked walk.
+        self._attach_shells = []
+        if self.attach_index >= 0 and self.exclusions:
+            self._attach_shells = _bond_distance_shells(
+                bond_graph, self.attach_index, max(self.exclusions) - 1
+            )
+        self._start_excluded = {}
         self.count = 0
         self.init_count = 0
         self.attempts = 0
@@ -1755,23 +1791,34 @@ class RandomWalkState:
         self.box_lengths = np.array([np.inf, np.inf, np.inf], dtype=np.float32)
 
     def excluded_indices(self):
-        """Return indices of existing sites bonded to the next candidate.
+        """Return sorted indices of existing sites left out of the overlap check.
 
-        Candidates are generated at the bond length from the site they bond
-        to, so that site is left out of the overlap check. Returns the last
-        accepted site once this walk has placed one, the attach site when
-        placing the first site of a walk that links to an existing path, and
-        an empty array when the next candidate has no bonded neighbor among
-        the existing sites.
+        These are the sites a given number of bonds from the next candidate,
+        for each separation in ``exclusions`` (1 for 1-2, 2 for 1-3 and 3 for
+        1-4). Bonds run back along this walk and, for a walk that links to an
+        existing path, on through the attach site into that path's bond
+        graph. Separations that reach past the first site of an unlinked walk
+        exclude nothing.
         """
-        if self.count > self.previous_count:
-            self._excluded_buffer[0] = self.count - 1
-            return self._excluded_buffer
-        attach_index = self.attach_index
-        if attach_index < 0:
+        n_walk = self.count - self.previous_count
+        if not self.exclusions:
             return self._no_excluded
-        self._excluded_buffer[0] = attach_index
-        return self._excluded_buffer
+        if n_walk >= self.exclusions[-1]:
+            np.subtract(self.count, self._walk_offsets, out=self._excluded_buffer)
+            return self._excluded_buffer
+        # Near the start of the walk, some excluded sites lie past its first
+        # site. This only happens for the first few sites, so cache by length.
+        excluded = self._start_excluded.get(n_walk)
+        if excluded is None:
+            sites = set()
+            for separation in self.exclusions:
+                if separation <= n_walk:
+                    sites.add(self.count - separation)
+                elif separation - n_walk - 1 < len(self._attach_shells):
+                    sites.update(self._attach_shells[separation - n_walk - 1])
+            excluded = np.array(sorted(sites), dtype=np.int64)
+            self._start_excluded[n_walk] = excluded
+        return excluded
 
     def dihedral_site_index(self):
         """Return the index of the site three bonds back from the next site.
@@ -1831,3 +1878,54 @@ class RandomWalkState:
             )
             return True
         return False
+
+
+_EXCLUSION_SEPARATIONS = {"1-2": 1, "1-3": 2, "1-4": 3}
+
+
+def _normalize_exclusions(exclusions):
+    """Resolve a user given exclusions argument into sorted bond separations.
+
+    Parameters
+    ----------
+    exclusions : str or iterable of str or None
+        Any of "1-2", "1-3" and "1-4". None or an empty iterable excludes
+        nothing.
+
+    Returns
+    -------
+    tuple of int
+        The number of bonds between the excluded pairs, ascending, e.g.
+        (1, 2, 3) for ("1-2", "1-3", "1-4").
+    """
+    if exclusions is None:
+        return ()
+    if isinstance(exclusions, str):
+        exclusions = (exclusions,)
+    separations = set()
+    for exclusion in exclusions:
+        if exclusion not in _EXCLUSION_SEPARATIONS:
+            raise ValueError(
+                f"{exclusion!r} is not a supported exclusion. Pass any of "
+                f"{list(_EXCLUSION_SEPARATIONS)}."
+            )
+        separations.add(_EXCLUSION_SEPARATIONS[exclusion])
+    return tuple(sorted(separations))
+
+
+def _bond_distance_shells(bond_graph, source, max_distance):
+    """Group the sites of a bond graph by their bond distance from source.
+
+    Returns a list whose entry k is the sorted list of sites exactly k bonds
+    from source, for k from 0 (source itself) to max_distance. Without a bond
+    graph, or when source is not in it, only source itself is known.
+    """
+    if bond_graph is None or source not in bond_graph:
+        return [[source]]
+    distances = nx.single_source_shortest_path_length(
+        bond_graph, source, cutoff=max_distance
+    )
+    shells = [[] for _ in range(max_distance + 1)]
+    for site, distance in distances.items():
+        shells[distance].append(site)
+    return [sorted(shell) for shell in shells]

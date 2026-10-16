@@ -5,6 +5,7 @@ import mbuild as mb
 from mbuild.exceptions import PathConvergenceError
 from mbuild.path.build import (
     Path,
+    RandomWalkState,
     cyclic,
     hard_sphere_random_walk,
     helix,
@@ -794,6 +795,98 @@ class TestRandomWalk(BaseTest):
             termination=Termination([NumSites(50), NumAttempts(1e4)]), **kwargs
         )
         assert np.allclose(path1.coordinates, path2.coordinates, atol=1e-7)
+
+    def test_rw_exclusions_1_3(self):
+        """Excluding 1-3 pairs allows a radius larger than the 1-3 distance."""
+        kwargs = dict(
+            termination=Termination([NumSites(100), NumAttempts(1e4)]),
+            bond_length=1.0,
+            radius=1.8,  # 1-3 distance is 1.66 at a 112 degree bond angle
+            rw_angles=np.array([np.radians(112)]),
+            seed=3,
+        )
+        with pytest.raises(ValueError):
+            hard_sphere_random_walk(**kwargs)
+        path = hard_sphere_random_walk(exclusions=("1-2", "1-3"), **kwargs)
+        assert len(path.coordinates) == 100
+        d13 = np.linalg.norm(path.coordinates[2:] - path.coordinates[:-2], axis=1)
+        assert np.all(d13 < 1.8)
+
+    def test_rw_exclusions_1_4(self):
+        """Excluding 1-4 pairs allows a radius larger than the gauche 1-4 distance."""
+        kwargs = dict(
+            termination=Termination([NumSites(100), NumAttempts(1e3)]),
+            bond_length=1.0,
+            radius=2.0,  # gauche 1-4 distance is 1.84 at a 112 degree bond angle
+            rw_angles=np.array([np.radians(112)]),
+            rw_dihedrals=np.array([np.pi / 3, -np.pi / 3]),
+            seed=3,
+        )
+        path = hard_sphere_random_walk(exclusions=("1-2", "1-3"), **kwargs)
+        assert len(path.coordinates) == 0
+        path = hard_sphere_random_walk(exclusions=("1-2", "1-3", "1-4"), **kwargs)
+        assert len(path.coordinates) == 100
+        d14 = np.linalg.norm(path.coordinates[3:] - path.coordinates[:-3], axis=1)
+        assert np.all(d14 < 2.0)
+
+    def test_rw_exclusions_link_linear_indices(self):
+        """Exclusions of a linked walk reach through the attach site into the path."""
+        path = straight_line(spacing=0.25, N=5)
+        state = RandomWalkState(
+            bond_length=0.25,
+            radius=0.2,
+            angles_sampler=None,
+            bead_name="_A",
+            initial_point=2,
+            previous_count=5,
+            connectivity="link-linear",
+            exclusions=("1-2", "1-3", "1-4"),
+            bond_graph=path.bond_graph,
+        )
+        expected = {
+            5: [0, 1, 2, 3, 4],
+            6: [1, 2, 3, 5],
+            7: [2, 5, 6],
+            8: [5, 6, 7],
+        }
+        for count, indices in expected.items():
+            state.count = count
+            assert state.excluded_indices().tolist() == indices
+        state.exclusions = ()
+        assert state.excluded_indices().size == 0
+
+    def test_rw_exclusions_link_linear(self):
+        """A walk linked to a mid-chain site skips that site's 1-3 neighbors.
+
+        The neighbors of site 2 lie on either side of it, so with a radius of
+        1.8 bond lengths every first site overlaps one of them unless the 1-3
+        pairs formed through the attach site are excluded. The 160 degree bond
+        angle keeps the walk's own 1-3 distance (1.97) above the radius.
+        """
+        kwargs = dict(
+            termination=Termination([NumSites(20), NumAttempts(1e4)]),
+            bond_length=1.0,
+            radius=1.8,
+            rw_angles=np.array([np.radians(160)]),
+            initial_point=2,
+            connectivity="link-linear",
+            seed=4,
+        )
+        with pytest.raises(PathConvergenceError):
+            hard_sphere_random_walk(path=straight_line(spacing=1.0, N=5), **kwargs)
+        path = straight_line(spacing=1.0, N=5)
+        hard_sphere_random_walk(path=path, exclusions=("1-2", "1-3"), **kwargs)
+        assert len(path.coordinates) == 25
+        assert path.bond_graph.has_edge(2, 5)
+
+    def test_rw_exclusions_bad_input(self):
+        with pytest.raises(ValueError):
+            hard_sphere_random_walk(termination=10, exclusions=("1-5",))
+        # Without 1-2 exclusions every site overlaps the site it bonds to.
+        with pytest.raises(ValueError):
+            hard_sphere_random_walk(
+                termination=10, bond_length=0.15, radius=0.2, exclusions=None
+            )
 
     def test_seeds_random_namer(self):
         # An unseeded stochastic namer is driven by the walk's seed, so
