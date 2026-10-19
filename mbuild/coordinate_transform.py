@@ -81,7 +81,7 @@ def force_overlap(
                 )
 
 
-class CoordinateTransform(object):
+class CoordinateTransform:
     """Coordinate transforms."""
 
     def __init__(self, T=None):
@@ -110,7 +110,7 @@ class Translation(CoordinateTransform):
         T[0, 3] = P[0]
         T[1, 3] = P[1]
         T[2, 3] = P[2]
-        super(Translation, self).__init__(T)
+        super().__init__(T)
 
 
 class RotationAroundZ(CoordinateTransform):
@@ -122,7 +122,7 @@ class RotationAroundZ(CoordinateTransform):
         T[0, 1] = -np.sin(theta)
         T[1, 0] = np.sin(theta)
         T[1, 1] = np.cos(theta)
-        super(RotationAroundZ, self).__init__(T)
+        super().__init__(T)
 
 
 class RotationAroundY(CoordinateTransform):
@@ -134,7 +134,7 @@ class RotationAroundY(CoordinateTransform):
         T[0, 2] = np.sin(theta)
         T[2, 0] = -np.sin(theta)
         T[2, 2] = np.cos(theta)
-        super(RotationAroundY, self).__init__(T)
+        super().__init__(T)
 
 
 class RotationAroundX(CoordinateTransform):
@@ -146,7 +146,7 @@ class RotationAroundX(CoordinateTransform):
         T[1, 2] = -np.sin(theta)
         T[2, 1] = np.sin(theta)
         T[2, 2] = np.cos(theta)
-        super(RotationAroundX, self).__init__(T)
+        super().__init__(T)
 
 
 class Rotation(CoordinateTransform):
@@ -174,7 +174,7 @@ class Rotation(CoordinateTransform):
             ]
         )
         T[0:3, 0:3] = m
-        super(Rotation, self).__init__(T)
+        super().__init__(T)
 
 
 class ChangeOfBasis(CoordinateTransform):
@@ -191,7 +191,7 @@ class ChangeOfBasis(CoordinateTransform):
         T = inv(T)
 
         T[0:3, 3:4] = -np.array([origin]).transpose()
-        super(ChangeOfBasis, self).__init__(T)
+        super().__init__(T)
 
 
 class AxisTransform(CoordinateTransform):
@@ -228,7 +228,7 @@ class AxisTransform(CoordinateTransform):
         # The concatentaion of translation and rotation.
         B_tr = np.dot(B, T_tr)
 
-        super(AxisTransform, self).__init__(B_tr)
+        super().__init__(B_tr)
 
 
 class RigidTransform(CoordinateTransform):
@@ -255,7 +255,7 @@ class RigidTransform(CoordinateTransform):
         H = np.zeros((3, 3), dtype=float)
 
         for i in range(rows):
-            H = H + np.transpose(A[i, :] - centroid_A).dot((B[i, :] - centroid_B))
+            H = H + np.transpose(A[i, :] - centroid_A).dot(B[i, :] - centroid_B)
 
         U, _, V = svd(H)
         V = np.transpose(V)
@@ -280,7 +280,7 @@ class RigidTransform(CoordinateTransform):
 
         T = C_B.dot(R_new).dot(C_A)
 
-        super(RigidTransform, self).__init__(T)
+        super().__init__(T)
 
 
 def unit_vector(v):
@@ -324,7 +324,7 @@ def _create_equivalence_transform(equiv):
         if not isinstance(pair, tuple) or len(pair) != 2:
             raise ValueError("Equivalence pair not a 2-tuple")
         if not (isinstance(pair[0], Compound) and isinstance(pair[1], Compound)):
-            raise ValueError(
+            raise TypeError(
                 f"Equivalence pair type mismatch: pair[0] is a {pair[0]} "
                 f"and pair[1] is a {pair[1]}"
             )

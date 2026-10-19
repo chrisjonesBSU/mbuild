@@ -26,7 +26,7 @@ jobs:
         shell: bash -l {0}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         name: Checkout Branch / Pull Request
 
       - name: Install Mamba (Linux)
@@ -67,7 +67,7 @@ jobs:
         shell: bash -l {0}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         name: Checkout Branch / Pull Request
 
       - name: Install Mamba (Linux)
@@ -92,7 +92,7 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         name: Checkout Branch / Pull Request
 
       - uses: Vampire/setup-wsl@v7
@@ -111,9 +111,9 @@ jobs:
           source ~/.bashrc
           source $HOME/miniforge/etc/profile.d/conda.sh
           mamba update -n base --all -y
-          mamba env create -f environment-dev.yml python=3.12 -y
+          mamba env create -f environment-dev.yml python=3.14 -y
           conda activate mbuild-dev
-          pip install -e . --prefix=$HOME/tmp_egginfo --no-build-isolation
+          pip install -e . --no-build-isolation
           python -m pytest -v --color yes --pyargs mbuild
 
   docker:
@@ -124,10 +124,10 @@ jobs:
 
     steps:
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Login to DockerHub
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
