@@ -23,6 +23,7 @@ from mbuild.path.points import (
     generate_trials,
     get_initial_point,
     get_second_point,
+    nearest_image,
 )
 from mbuild.path.termination import NumSites, Termination, Terminator
 from mbuild.utils.io import import_
@@ -1497,28 +1498,17 @@ def hard_sphere_random_walk(
     while not walk_finished:
         batch_angles, batch_vectors, batch_phis = generate_trials(state)
         pos1 = coordinates[state.count - 1]
-        pos2 = coordinates[state.count - 2]
+        pos2 = nearest_image(pos1, coordinates[state.count - 2], pbc, box_lengths)
         # A dihedral needs three prior sites of this walk; only apply phi from
         # its 4th site on. state.count indexes the whole path, which may already
         # hold other chains, so count this walk's sites from init_count.
         if batch_phis is not None and state.count - state.init_count >= 3:
-            pos3 = coordinates[state.count - 3]
+            # Unwrap against pos2, which is already unwrapped against pos1.
+            pos3 = nearest_image(pos2, coordinates[state.count - 3], pbc, box_lengths)
             phis = batch_phis
         else:
             pos3 = None
             phis = None
-        if any(pbc):
-            # Stored coordinates are wrapped, and next_step measures the angle
-            # from pos2 - pos1 and the dihedral from pos3 - pos2. Bring each
-            # site into the image nearest its bonded neighbour. box_lengths is
-            # inf on aperiodic axes.
-            delta = pos2 - pos1
-            delta[pbc] -= np.round(delta[pbc] / box_lengths[pbc]) * box_lengths[pbc]
-            pos2 = pos1 + delta
-            if pos3 is not None:
-                delta = pos3 - pos2
-                delta[pbc] -= np.round(delta[pbc] / box_lengths[pbc]) * box_lengths[pbc]
-                pos3 = pos2 + delta
         candidates = next_step(
             pos1=pos1,
             pos2=pos2,
