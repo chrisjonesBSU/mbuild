@@ -47,16 +47,21 @@ def get_second_point(state, existing_points, beads, check_path, next_step):
     # Set pos1 and pos2 before checking include compound and combining coordinates
     if state.connectivity == "link-linear" and state.attach_index >= 0:
         pos1 = existing_points[-1]
-        pos2 = existing_points[state.attach_index]
+        pos2 = nearest_image(
+            pos1, existing_points[state.attach_index], state.pbc, state.box_lengths
+        )
     else:
         pos1 = None
         pos2 = existing_points[-1]
-    # Update existing points and beads to include those in the compound.
+    # Include the compound's points. Biases read coordinates[-1] as the chain
+    # tip, so they get the compound first.
+    bias_points, bias_beads = existing_points, beads
     if state.include_compound:
         compound_xyz = state.include_compound.xyz
         compound_names = np.array([p.name for p in state.include_compound.particles()])
+        bias_points = np.concat((compound_xyz, existing_points))
+        bias_beads = np.concat((compound_names, beads))
         existing_points = np.concat((existing_points, compound_xyz))
-        beads = np.concat((beads, compound_names))
 
     xyzs = next_step(
         pos1=pos1,
@@ -72,7 +77,7 @@ def get_second_point(state, existing_points, beads, check_path, next_step):
         xyzs = xyzs[is_inside_mask]
 
     if state.bias:
-        xyzs = state.bias(candidates=xyzs, coordinates=existing_points, names=beads)
+        xyzs = state.bias(candidates=xyzs, coordinates=bias_points, names=bias_beads)
 
     if any(state.pbc):
         xyzs = (
@@ -437,6 +442,19 @@ def generate_trials(state, dihedral_sites=None):
     # uniform azimuth around the chain direction.
     r = state.rng.normal(size=(state.trial_batch_size, 3)).astype(np.float32)
     return thetas, r
+
+
+def nearest_image(pos1, pos2, pbc, box_lengths):
+    """Return the periodic image of pos2 closest to pos1.
+
+    Stored coordinates are wrapped, but next_step measures the bond angle
+    from pos2 - pos1, so pos2 must sit on the same side of the box as pos1.
+    """
+    if not any(pbc):
+        return pos2
+    delta = pos2 - pos1
+    delta[pbc] -= np.round(delta[pbc] / box_lengths[pbc]) * box_lengths[pbc]
+    return pos1 + delta
 
 
 def generate_crosslink_init_points():

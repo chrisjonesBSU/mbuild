@@ -1,5 +1,6 @@
 """Simulation methods that operate on mBuild compounds and paths."""
 
+import copy
 import logging
 import numbers
 import os
@@ -108,8 +109,8 @@ class HoomdSimulation(hoomd.simulation.Simulation):
                 device = hoomd.device.GPU()
                 logger.info(f"GPU found, running on device {device.device}")
             except RuntimeError:
-                logger.info(
-                    "Unable to find compatible GPU device. "
+                logger.warning(
+                    "Unable to find compatible GPU device, running on CPU. "
                     "Set `run_on_gpu = False` or see HOOMD documentation."
                 )
                 device = hoomd.device.CPU()
@@ -125,32 +126,55 @@ class HoomdSimulation(hoomd.simulation.Simulation):
         self.box = box
         self.speedup_by_moltag = speedup_by_moltag
         self.energies = []
-        self._resolve_compound_box()
+        box_has_origin = self._resolve_compound_box()
         box_lengths = np.asarray(self.compound.box.lengths, dtype=float)
 
-        self.compound.xyz, self._centered = _normalize_to_box_convention(
-            self.compound.xyz, box_lengths
+        # State and forces are built together, so reuse them only when every
+        # build input still matches. A reused snapshot is in the frame it was
+        # built in, so its frame is reused too rather than re-derived. A
+        # box_update resizes the cached snapshot, so it is only reused while
+        # its box still matches the one asked for.
+        last_snapshot, last_forces, last_params = compound._get_sim_data()
+        reuse = (
+            last_snapshot is not None
+            and _same_build(self._build_params(), last_params)
+            and "frame" in last_params
+            and "orig_force_params" in last_params
+            and np.allclose(last_snapshot.configuration.box[:3], box_lengths)
         )
+        if reuse:
+            self._centered, self._origin = last_params["frame"]
+        else:
+            self.compound.xyz, self._centered, self._origin = (
+                _normalize_to_box_convention(
+                    self.compound.xyz, box_lengths, has_origin=box_has_origin
+                )
+            )
         self._frame_offset = self._frame_offset_for(box_lengths)
         self._get_integrate_group()
 
-        # State and forces are built together, so reuse them only when every
-        # build input still matches.
-        last_snapshot, last_forces, last_params = compound._get_sim_data()
-        if last_snapshot is not None and _same_build(self._build_params(), last_params):
+        # Cached forces may still carry a previous run's scaling, so their
+        # unscaled params are recorded once, when built, and cached with them.
+        if reuse:
             snapshot = last_snapshot
             self.forces = last_forces
+            self._orig_force_params = last_params["orig_force_params"]
         else:
             snapshot, self.forces = self._to_hoomd_snap_forces()
+            self._orig_force_params = self._snapshot_force_params()
             compound._add_sim_data(
-                state=snapshot, forces=self.forces, build_params=self._build_params()
+                state=snapshot,
+                forces=self.forces,
+                build_params={
+                    **self._build_params(),
+                    "frame": (self._centered, self._origin),
+                    "orig_force_params": self._orig_force_params,
+                },
             )
 
         self.active_forces = []
-        self._orig_force_params = {}
         super(HoomdSimulation, self).__init__(device=device, seed=seed)
         self.create_state_from_snapshot(snapshot)
-        self._orig_force_params = self._snapshot_force_params()
 
     def nvt(
         self,
@@ -174,25 +198,16 @@ class HoomdSimulation(hoomd.simulation.Simulation):
         tau : float
             Thermostat coupling time constant.
         forces_handler : ForcesHandler or None, default None
-            Scales the active forces before the run. If None, all forces are
-            active at full strength.
+            Scales forces for this run only, relative to their original
+            params; see ForcesHandler. If None, all forces are active at
+            their original strength, whatever earlier runs used.
         thermostat : hoomd thermostat class
             Thermostat used by the integration method.
         """
         self.original_coords = np.copy(self.compound.xyz)
-        if forces_handler is not None:
-            forces_handler.scale_sim(self)
-        else:
-            self.active_forces = list(self.forces)
+        self._set_active_forces(forces_handler)
 
-        # Set kT ramp if user passed in a [start, finish] kT:
-        if isinstance(kT, (list, tuple, np.ndarray)):
-            thermal_kT = kT[0]
-            kT = hoomd.variant.Ramp(
-                A=kT[0], B=kT[1], t_start=self.timestep, t_ramp=int(n_steps)
-            )
-        else:
-            thermal_kT = kT
+        kT, thermal_kT = _kT_variant(kT, self.timestep, n_steps)
 
         nvt_method = hoomd.md.methods.ConstantVolume(
             filter=self._get_integrate_group(),
@@ -240,25 +255,16 @@ class HoomdSimulation(hoomd.simulation.Simulation):
         update_period : int
             Number of timesteps between box resize updates.
         forces_handler : ForcesHandler or None, default None
-            Scales the active forces before the run. If None, all forces are
-            active at full strength.
+            Scales forces for this run only, relative to their original
+            params; see ForcesHandler. If None, all forces are active at
+            their original strength, whatever earlier runs used.
         thermostat : hoomd thermostat class
             Thermostat used by the integration method.
         """
         self.original_coords = np.copy(self.compound.xyz)
-        if forces_handler is not None:
-            forces_handler.scale_sim(self)
-        else:
-            self.active_forces = list(self.forces)
+        self._set_active_forces(forces_handler)
 
-        # Set kT ramp if user passed in a [start, finish] array:
-        if isinstance(kT, (list, tuple, np.ndarray)):
-            thermal_kT = kT[0]
-            kT = hoomd.variant.Ramp(
-                A=kT[0], B=kT[1], t_start=self.timestep, t_ramp=int(n_steps)
-            )
-        else:
-            thermal_kT = kT
+        kT, thermal_kT = _kT_variant(kT, self.timestep, n_steps)
 
         nvt_method = hoomd.md.methods.ConstantVolume(
             filter=self._get_integrate_group(),
@@ -293,6 +299,11 @@ class HoomdSimulation(hoomd.simulation.Simulation):
         self.operations.integrator = None
         self._update_positions()
         self._update_snapshot()
+        # A resized bounding box still has no origin, so keep it marked.
+        if "bbox_lengths" in self.compound._hoomd_data:
+            self.compound._hoomd_data["bbox_lengths"] = np.asarray(
+                self.compound.box.lengths, dtype=float
+            )
 
     def cap_displacement(
         self,
@@ -310,8 +321,9 @@ class HoomdSimulation(hoomd.simulation.Simulation):
         dt : float
             Timestep size.
         forces_handler : ForcesHandler or None, default None
-            Scales the active forces before the run. If None, all forces are
-            active at full strength.
+            Scales forces for this run only, relative to their original
+            params; see ForcesHandler. If None, all forces are active at
+            their original strength, whatever earlier runs used.
         max_displacement : float (nm), default 1e-3
             Maximum distance a particle may move in a single timestep.
 
@@ -324,10 +336,7 @@ class HoomdSimulation(hoomd.simulation.Simulation):
         velocity and run away on stiff potentials.
         """
         self.original_coords = np.copy(self.compound.xyz)
-        if forces_handler is not None:
-            forces_handler.scale_sim(self)
-        else:
-            self.active_forces = list(self.forces)
+        self._set_active_forces(forces_handler)
 
         displacement_capped = hoomd.md.methods.DisplacementCapped(
             filter=self._get_integrate_group(),
@@ -368,8 +377,9 @@ class HoomdSimulation(hoomd.simulation.Simulation):
         n_steps : int
             Number of timesteps per minimization iteration.
         forces_handler : ForcesHandler or None, default None
-            Scales the active forces before the run. If None, all forces are
-            active at full strength.
+            Scales forces for this run only, relative to their original
+            params; see ForcesHandler. If None, all forces are active at
+            their original strength, whatever earlier runs used.
         n_iterations : int, default 1
             Number of minimization iterations, resetting the integrator between
             each.
@@ -396,10 +406,7 @@ class HoomdSimulation(hoomd.simulation.Simulation):
             Energy convergence tolerance.
         """
         self.original_coords = np.copy(self.compound.xyz)
-        if forces_handler is not None:
-            forces_handler.scale_sim(self)
-        else:
-            self.active_forces = list(self.forces)
+        self._set_active_forces(forces_handler)
 
         nvt_method = hoomd.md.methods.ConstantVolume(filter=self._get_integrate_group())
         self._set_fire_integrator(
@@ -489,7 +496,14 @@ class HoomdSimulation(hoomd.simulation.Simulation):
         }
 
     def _resolve_compound_box(self):
-        """Settle self.compound.box from the explicit box, or a bounding box."""
+        """Settle self.compound.box from the explicit box, or a bounding box.
+
+        Returns False when the box was made from the bounding box, which has
+        lengths but no origin to place the coordinates against. That box is
+        stored on the compound, so its lengths are remembered and a later
+        simulation of the same compound treats it the same way.
+        """
+        sim_data = self.compound._hoomd_data
         if self.box is not None:
             # Explicit box (e.g. a constraint's orthorhombic box_lengths) wins,
             # so the periodic cell is stable across repeated MC/MD rounds.
@@ -498,10 +512,25 @@ class HoomdSimulation(hoomd.simulation.Simulation):
             )
         elif not self.compound.box:
             self.compound.box = self.compound.get_boundingbox(pad_box=self.box_buffer)
+            sim_data["bbox_lengths"] = np.asarray(
+                self.compound.box.lengths, dtype=float
+            )
+            return False
+        else:
+            bbox_lengths = sim_data.get("bbox_lengths")
+            if bbox_lengths is not None and np.allclose(
+                self.compound.box.lengths, bbox_lengths
+            ):
+                return False
+        # Any other box is a periodic cell with an origin.
+        sim_data.pop("bbox_lengths", None)
+        return True
 
     def _frame_offset_for(self, box_lengths):
         """Translation from HOOMD's frame back to the compound's, for a box."""
-        return np.where(self._centered, 0.0, np.asarray(box_lengths, dtype=float) / 2.0)
+        return self._origin + np.where(
+            self._centered, 0.0, np.asarray(box_lengths, dtype=float) / 2.0
+        )
 
     def _to_hoomd_snap_forces(self):
         """Convert compound to HOOMD snapshot and forces."""
@@ -568,10 +597,26 @@ class HoomdSimulation(hoomd.simulation.Simulation):
         for force in self.forces:
             if not hasattr(force, "params"):
                 continue
+            # Deep copy so table arrays are not shared with the live force.
             orig[id(force)] = {
-                param: dict(force.params[param]) for param in force.params
+                param: copy.deepcopy(dict(force.params[param]))
+                for param in force.params
             }
         return orig
+
+    def _restore_force_params(self):
+        """Reset every force to its unscaled params, undoing any ForcesHandler."""
+        for force in self.forces:
+            for param, values in self._orig_force_params.get(id(force), {}).items():
+                force.params[param] = copy.deepcopy(values)
+
+    def _set_active_forces(self, forces_handler):
+        """Activate forces for a run, scaled by forces_handler if given."""
+        if forces_handler is not None:
+            forces_handler.scale_sim(self)
+        else:
+            self._restore_force_params()
+            self.active_forces = list(self.forces)
 
     def _particle_tags(self, compounds, name):
         """Resolve Compounds or particle indices into a list of HOOMD tags."""
@@ -1025,6 +1070,10 @@ class OpenMMSimulation:
 class ForcesHandler:
     """Provides a quick method for tuning HOOMD forces.
 
+    Each ``scale_*`` value multiplies a force's original parameters, the ones
+    it was built with, for the run the handler is passed to. A value of 1 uses
+    the original force and 0 leaves the force out of the run.
+
     Parameters
     ----------
     dpd : float, default 0.0
@@ -1036,6 +1085,34 @@ class ForcesHandler:
     scale_opls : float, default 0.0
     scale_improper : float, default 0.0
     scale_charge : float, default 0.0
+
+    Notes
+    -----
+    Scaling is never cumulative. Every run starts from the original
+    parameters, so a scale applies only to the run it is passed to:
+
+    - To return to full strength, run without a handler, or pass a scale of 1.
+      Do not pass the inverse of an earlier scale: after ``scale_bond=0.25``,
+      ``scale_bond=4`` gives bonds 4 times their original strength, not 1.
+    - Repeating a run, or creating a new ``HoomdSimulation`` of the same
+      compound, applies the same scale again rather than compounding it.
+
+    ``ForcesHandler()`` is not the same as no handler. The dihedral, improper
+    and charge scales default to 0, so a default handler turns those forces
+    off. Pass 1 explicitly to keep them.
+
+    Only the force types listed above are scaled. Any other force in the
+    simulation, for example the FENE bonds of a path forcefield built with
+    ``btype="fene"``, is left out of runs that use a handler.
+
+    ``scale_angle`` also scales tabulated angles, and ``scale_periodic``
+    scales tabulated dihedrals. Because ``scale_periodic`` defaults to 0, the
+    default handler turns off the dihedral table of a path forcefield.
+
+    A path forcefield leaves angle and dihedral partners out of the LJ when a
+    table covers them, so the table is the only force keeping those beads
+    apart. Scaling it down or turning it off lets them overlap, which can be
+    useful during a soft push-off.
     """
 
     def __init__(
@@ -1062,7 +1139,12 @@ class ForcesHandler:
         self.forcesDict = {}
 
     def scale_sim(self, sim):
-        """Iterate through HOOMD force objects and apply scaling factors."""
+        """Reset sim's forces to their original params, then apply the scaling factors.
+
+        Sets ``sim.active_forces`` to the forces this handler keeps.
+        """
+        # Start from unscaled params, including forces this handler turns off.
+        sim._restore_force_params()
         sim.active_forces = []
         forcesDict = {
             "lj": (hoomd.md.pair.LJ, ("epsilon")),
@@ -1176,7 +1258,19 @@ def _wrap_into_box(snap):
     snap.particles.position = pos.astype(np.float32)
 
 
-def _normalize_to_box_convention(xyz, box_lengths):
+def _kT_variant(kT, t_start, n_steps):
+    """Return (thermostat kT, initial kT), ramping if kT is [start, finish]."""
+    if not isinstance(kT, (list, tuple, np.ndarray)):
+        return kT, kT
+    if len(kT) != 2:
+        raise ValueError(
+            f"kT should be a single value or [kT_start, kT_finish], got {kT}."
+        )
+    ramp = hoomd.variant.Ramp(A=kT[0], B=kT[1], t_start=t_start, t_ramp=int(n_steps))
+    return ramp, kT[0]
+
+
+def _normalize_to_box_convention(xyz, box_lengths, has_origin=True):
     """Wrap coordinates into whichever box convention the compound already uses.
 
     Coordinates are written either centered on the origin, spanning
@@ -1191,6 +1285,9 @@ def _normalize_to_box_convention(xyz, box_lengths):
         Compound coordinates.
     box_lengths : array-like, shape (3,)
         Box edge lengths.
+    has_origin : bool, default True
+        False when the box only carries lengths (e.g. a bounding box), so
+        no convention applies and every axis is shifted rather than wrapped.
 
     Returns
     -------
@@ -1198,20 +1295,31 @@ def _normalize_to_box_convention(xyz, box_lengths):
         Coordinates wrapped into the compound's own convention.
     centered : np.ndarray of bool, shape (3,)
         True on axes written about the origin, False on axes written from 0.
+    origin : np.ndarray, shape (3,)
+        Rigid shift into HOOMD's centered frame on axes that follow neither
+        convention, zero elsewhere.
     """
     xyz = np.array(xyz, dtype=float, copy=True)
     L = np.asarray(box_lengths, dtype=float)
     outside_centered = ((xyz < -L / 2.0) | (xyz >= L / 2.0)).sum(axis=0)
     outside_corner = ((xyz < 0.0) | (xyz >= L)).sum(axis=0)
     centered = outside_centered <= outside_corner
+    # Coordinates mostly outside both ranges (e.g. a molecule away from the
+    # origin) follow neither convention. Wrapping them atom by atom would
+    # move and split molecules, so center them rigidly instead.
+    unplaced = np.minimum(outside_centered, outside_corner) > len(xyz) / 2.0
+    if not has_origin:
+        unplaced[:] = True
+    origin = np.where(unplaced, (xyz.max(axis=0) + xyz.min(axis=0)) / 2.0, 0.0)
+    centered = centered | unplaced
     mins = np.where(centered, -L / 2.0, 0.0)
     # A span wider than the box has no valid periodic image.
     span = xyz.max(axis=0) - xyz.min(axis=0)
-    wrappable = (L > 0) & (span <= L)
+    wrappable = (L > 0) & (span <= L) & ~unplaced
     xyz[:, wrappable] = mins[wrappable] + np.mod(
         xyz[:, wrappable] - mins[wrappable], L[wrappable]
     )
-    return xyz, centered
+    return xyz, centered, origin
 
 
 def _sync_back(compound, is_path, original):
