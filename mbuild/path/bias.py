@@ -68,7 +68,7 @@ class TargetCoordinate(Bias):
 
     def __init__(self, target_coordinate, weight):
         self.target_coordinate = np.asarray(target_coordinate)
-        super(TargetCoordinate, self).__init__(weight=weight)
+        super().__init__(weight=weight)
 
     def __call__(self, candidates, coordinates, names):
         """Sorts a set of candidate coordinates according to the bias.
@@ -104,7 +104,7 @@ class AvoidCoordinate(Bias):
 
     def __init__(self, avoid_coordinate, weight):
         self.avoid_coordinate = np.asarray(avoid_coordinate)
-        super(AvoidCoordinate, self).__init__(weight=weight)
+        super().__init__(weight=weight)
 
     def __call__(self, candidates, coordinates, names):
         """Sorts a set of candidate coordinates according to the bias.

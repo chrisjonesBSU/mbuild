@@ -10,7 +10,7 @@ the rest of this package.
 import networkx as nx
 import numpy as np
 
-__all__ = ["to_cgsmiles_graph", "to_cgsmiles"]
+__all__ = ["to_cgsmiles", "to_cgsmiles_graph"]
 
 
 def to_cgsmiles_graph(system, fragname_map=None):

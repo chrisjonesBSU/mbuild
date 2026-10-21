@@ -139,7 +139,7 @@ class HoomdSimulation(hoomd.simulation.Simulation):
 
         self.active_forces = []
         self._orig_force_params = {}
-        super(HoomdSimulation, self).__init__(device=device, seed=seed)
+        super().__init__(device=device, seed=seed)
         self.create_state_from_snapshot(snapshot)
         self._orig_force_params = self._snapshot_force_params()
 

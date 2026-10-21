@@ -39,7 +39,7 @@ import numpy as np
 from .convert import _sorted_components
 from .fragments import _particle_symbol, compound_to_fragment_graph
 
-__all__ = ["coarse_grain", "CGMapping"]
+__all__ = ["CGMapping", "coarse_grain"]
 
 
 @dataclass

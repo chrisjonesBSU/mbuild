@@ -28,18 +28,17 @@ Information and Modeling 2025 65 (7), 3405-3419.
 DOI: 10.1021/acs.jcim.5c00064
 """
 
-# ruff: noqa: F401
 from .backmap import backmap, resolve
 from .cg_map import CGMapping, coarse_grain
 from .convert import to_cgsmiles, to_cgsmiles_graph
 from .fragments import compound_to_fragment_graph
 
 __all__ = [
+    "CGMapping",
     "backmap",
     "coarse_grain",
-    "CGMapping",
+    "compound_to_fragment_graph",
     "resolve",
     "to_cgsmiles",
     "to_cgsmiles_graph",
-    "compound_to_fragment_graph",
 ]

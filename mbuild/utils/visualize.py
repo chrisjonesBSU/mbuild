@@ -292,7 +292,7 @@ def _visualize_nglview(compound, show_ports=False):
         Visualize Ports in addition to Particles
     """
     nglview = import_("nglview")
-    import_("mdtraj")  # noqa: F841
+    import_("mdtraj")
     from mdtraj.geometry.sasa import _ATOMIC_RADII
 
     def remove_digits(x):

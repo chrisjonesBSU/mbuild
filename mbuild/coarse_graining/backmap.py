@@ -25,7 +25,7 @@ from .convert import _sorted_components, to_cgsmiles_graph
 from .fragments import compound_to_fragment_graph
 from .placement import generate_positions
 
-__all__ = ["resolve", "backmap"]
+__all__ = ["backmap", "resolve"]
 
 
 def resolve(

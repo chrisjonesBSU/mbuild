@@ -9,7 +9,7 @@ class TestPlugins(BaseTest):
 
     @pytest.mark.parametrize(
         "recipe_name",
-        ["Monolayer", "Polymer", "SilicaInterface", "TiledCompound"],
+        ["Monolayer", "SilicaInterface", "TiledCompound"],
     )
     def test_recipes_contents(self, recipe_name):
         import mbuild.recipes

@@ -101,7 +101,7 @@ class Path:
                 self.beads = bead_name.astype(BEAD_NAME_DTYPE)
             elif isinstance(bead_name, list):
                 self.beads = np.array(bead_name, dtype=BEAD_NAME_DTYPE)
-            for idx in range(len((self.coordinates))):
+            for idx in range(len(self.coordinates)):
                 self.bond_graph.add_node(idx)
         # Nothing is defined, create empty place holders for coords, bond graph and bead names
         else:
@@ -316,7 +316,6 @@ class Path:
         self, u, min_bond_length, max_bond_length, excluded_bond_depth=0
     ):
         """Don't add a new particle."""
-        pass
         # return candidate_neighbors
 
     def get_bonded_sites(self):
@@ -1363,9 +1362,7 @@ def hard_sphere_random_walk(
         )
     elif isinstance(termination, int):
         termination = Termination(NumSites(termination))
-    elif isinstance(termination, (tuple, list)):
-        termination = Termination(termination)
-    elif isinstance(termination, Terminator):
+    elif isinstance(termination, (tuple, list)) or isinstance(termination, Terminator):
         termination = Termination(termination)
     elif not isinstance(termination, Termination):
         raise ValueError(f"Bad input {termination=} to hard_sphere_random_walk")

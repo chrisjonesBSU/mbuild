@@ -92,7 +92,7 @@ class Polymer(Compound):
     """
 
     def __init__(self, monomers=None, end_groups=None):
-        super(Polymer, self).__init__()
+        super().__init__()
         self._monomers = monomers or []
         self._end_groups = end_groups or [None, None]
         # Set default of single bond order for all monomer-monomer and monomer-group bonds

@@ -851,7 +851,6 @@ def direct_crosslink(
             if candidate_site not in backbone_set or candidate_site in excluded:
                 continue
             yield (origin, int(candidate_site))
-    return None
 
 
 def _verify_direct_bond(
@@ -1128,7 +1127,6 @@ def _check_all_overlap(points, existing_points, radius, pbc, box_lengths):
 
 def two_site_crosslink():
     """Crosslinking where backbones bond to two different crosslinker sites."""
-    pass
 
 
 # =============================================================================
