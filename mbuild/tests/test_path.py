@@ -390,8 +390,6 @@ class TestRandomWalk(BaseTest):
                         chain_passed = True
                 except PathConvergenceError:
                     pass
-                except Exception:
-                    break  # only break on unexpected errors
         comp = rw_system.to_compound()
         assert len(comp.check_for_overlap(minimum_distance=radius - tolerance)) == 0
 
