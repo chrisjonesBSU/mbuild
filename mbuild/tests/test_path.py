@@ -9,7 +9,6 @@ from mbuild.path.build import (
     hard_sphere_random_walk,
     helix,
     knot,
-    lamellar,
     spiral_2D,
     straight_line,
     zigzag,
@@ -153,72 +152,6 @@ class TestPaths(BaseTest):
         assert path.bond_graph.number_of_edges() == 49
         comp = path.to_compound()
         assert comp.n_bonds == comp.n_particles - 1
-
-    def test_lamellar(self):
-        path = Path()
-        lamellar(
-            path=path,
-            spacing=0.25,
-            num_layers=3,
-            layer_separation=1.0,
-            layer_length=3.0,
-            num_stacks=3,
-            stack_separation=1.0,
-        )
-        assert path.bond_graph.number_of_edges() == len(path.coordinates) - 1
-        compound = path.to_compound()
-        Lx, Ly, Lz = compound.get_boundingbox().lengths
-        # The params used here should create a cubic-like lamellar structure
-        # Y-direction will be slightly larger because of curves between layers
-        assert np.allclose(Lx, Lz, atol=0.1)  # stacking and layering directions
-        assert Ly > Lx
-
-    def test_lamellar_direction(self):
-        path_left_to_right = Path()
-        lamellar(
-            path=path_left_to_right,
-            spacing=0.25,
-            num_layers=3,
-            layer_separation=1.0,
-            layer_length=3.0,
-            num_stacks=3,
-            stack_separation=1.0,
-            initial_point=(0, 0, 0),
-        )
-
-        path_right_to_left = Path()
-        lamellar(
-            path=path_right_to_left,
-            spacing=0.25,
-            num_layers=3,
-            layer_separation=1.0,
-            layer_length=3.0,
-            num_stacks=3,
-            stack_separation=1.0,
-            initial_point=(0, 0, 0),
-            left_to_right=False,
-        )
-
-        assert np.array_equal(
-            path_left_to_right.coordinates[0], path_right_to_left.coordinates[0]
-        )
-        assert path_right_to_left.coordinates[1][1] < 0
-        assert path_left_to_right.coordinates[1][1] > 0
-
-    def test_lamellar_initial_point(self):
-        path = Path()
-        lamellar(
-            path=path,
-            spacing=0.25,
-            num_layers=3,
-            layer_separation=1.0,
-            layer_length=3.0,
-            num_stacks=3,
-            stack_separation=1.0,
-            initial_point=(1, 1, 1),
-        )
-        assert np.array_equal(path.coordinates[0], np.array([1, 1, 1]))
-        assert np.allclose(path.coordinates[-1][2], 3.0, atol=0.5)
 
     def test_helix(self):
         path = Path()
@@ -461,6 +394,106 @@ class TestRandomWalk(BaseTest):
         expected = walk_from_index(2)
         assert np.allclose(path.coordinates, expected.coordinates)
         assert set(path.bond_graph.edges) == set(expected.bond_graph.edges)
+
+    @pytest.mark.parametrize("seed", [0, 3, 5, 7])
+    def test_initial_point_index_wraps_into_periodic_box(self, seed):
+        """A walk started from a site near a face stays inside a periodic box.
+
+        The site index branch places its first site a bond length off an
+        existing site, which can land outside the box. On a periodic axis that
+        point must be wrapped back in rather than stored as-is. These seeds all
+        place that site outside the box when the wrap is removed.
+        """
+        L = 4.0
+        box = CuboidConstraint(Lx=L, Ly=L, Lz=L, pbc=(True, True, True))
+        # A single site sitting hard against the +x face, so a bond length step
+        # off it falls outside the box for roughly half of the candidates.
+        path = Path(coordinates=np.array([[L / 2 - 0.01, 0.0, 0.0]]))
+        hard_sphere_random_walk(
+            path=path,
+            termination=Termination([NumSites(12), NumAttempts(1e4)]),
+            bond_length=0.25,
+            radius=0.22,
+            initial_point=0,
+            connectivity="link-linear",
+            volume_constraint=box,
+            seed=seed,
+        )
+        coords = path.coordinates
+        assert len(coords) > 1
+        outside = ((coords < -L / 2) | (coords >= L / 2)).any(axis=1)
+        assert not outside.any(), f"sites outside the periodic box: {coords[outside]}"
+
+    @pytest.mark.parametrize("seed", [0, 3, 5, 7])
+    def test_link_linear_angle_across_periodic_face(self, seed):
+        """The first bond angle of a linked walk is right when the link crosses a face.
+
+        Same setup as above, so the first site is often wrapped to the other
+        side of the box from the site it links to.
+        """
+        L = 4.0
+        theta = 2.0
+        box = CuboidConstraint(Lx=L, Ly=L, Lz=L, pbc=(True, True, True))
+        path = Path(coordinates=np.array([[L / 2 - 0.01, 0.0, 0.0]]))
+        hard_sphere_random_walk(
+            path=path,
+            termination=Termination([NumSites(3), NumAttempts(1e4)]),
+            bond_length=0.25,
+            radius=0.22,
+            rw_angles=AnglesSampler("choice", {"a": [theta]}),
+            initial_point=0,
+            connectivity="link-linear",
+            volume_constraint=box,
+            seed=seed,
+        )
+        a, b, c = path.coordinates[:3]
+        v1 = a - b
+        v2 = c - b
+        v1 -= np.round(v1 / L) * L
+        v2 -= np.round(v2 / L) * L
+        cos = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+        assert np.isclose(np.arccos(cos), theta, atol=1e-3)
+
+    @pytest.mark.parametrize("connectivity", ["linear", "link-linear"])
+    def test_bond_attributes_across_periodic_face(self, connectivity):
+        """Stored bond length and direction use the minimum image under PBC."""
+        L = 2.5
+        box = CuboidConstraint(Lx=L, Ly=L, Lz=L, pbc=(True, True, True))
+        path = Path(coordinates=np.array([[L / 2 - 0.01, 0.0, 0.0]]))
+        hard_sphere_random_walk(
+            path=path,
+            termination=Termination([NumSites(200), NumAttempts(1e4)]),
+            bond_length=0.25,
+            radius=0.22,
+            initial_point=0,
+            connectivity=connectivity,
+            volume_constraint=box,
+            seed=3,
+        )
+        crossings = 0
+        for u, v, data in path.bond_graph.edges(data=True):
+            raw = path.coordinates[v] - path.coordinates[u]
+            crossings += np.linalg.norm(raw) > L / 2
+            image = raw - np.round(raw / L) * L
+            assert np.isclose(data["length"], 0.25, atol=1e-4)
+            assert np.allclose(
+                data["direction"], image / np.linalg.norm(image), atol=1e-4
+            )
+        assert (
+            crossings > 0
+        )  # the walk must actually cross a face for this to test anything
+
+    def test_add_edge_minimum_image(self):
+        L = 2.0
+        path = Path(coordinates=np.array([[0.9, 0.0, 0.0], [-0.85, 0.0, 0.0]]))
+        path.add_edge(0, 1)
+        assert np.isclose(path.bond_graph.edges[0, 1]["length"], 1.75)
+        path.add_edge(0, 1, pbc=(True, True, True), box_lengths=(L, L, L))
+        assert np.isclose(path.bond_graph.edges[0, 1]["length"], 0.25)
+        assert np.allclose(path.bond_graph.edges[0, 1]["direction"], [1, 0, 0])
+        # A non-periodic axis is left alone
+        path.add_edge(0, 1, pbc=(False, True, True), box_lengths=(L, L, L))
+        assert np.isclose(path.bond_graph.edges[0, 1]["length"], 1.75)
 
     def test_initial_point_bad_type(self):
         for bad in [2.5, np.array([1, 2]), "2"]:
