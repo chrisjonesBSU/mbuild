@@ -215,7 +215,7 @@ def build_path_ff(
     for i, t1 in enumerate(ptypes):
         for t2 in ptypes[i:]:
             sigma_ij = 0.5 * (radius[t1] + radius[t2])
-            lj.params[(t1, t2)] = dict(sigma=sigma_ij, epsilon=epsilon)
+            lj.params[(t1, t2)] = {"sigma": sigma_ij, "epsilon": epsilon}
             lj.r_cut[(t1, t2)] = r_cut * sigma_ij
     forces.append(lj)
 
@@ -229,10 +229,10 @@ def build_path_ff(
                 sigma_bond = bond_length[bt]
                 a, b = group[np.argmax(btypeid == i)]
                 energy_units = epsilon / sigma_bond**2
-                bond_template.params[bt] = dict(
-                    k=100.0 * energy_units,
-                    r0=sigma_bond,
-                )
+                bond_template.params[bt] = {
+                    "k": 100.0 * energy_units,
+                    "r0": sigma_bond,
+                }
         elif btype.lower() == "fene":
             bond_template = hoomd.md.bond.FENEWCA()
             for i, bt in enumerate(snap.bonds.types):
@@ -250,13 +250,13 @@ def build_path_ff(
                         bt,
                         sigma_pair,
                     )
-                bond_template.params[bt] = dict(
-                    k=30.0 * epsilon / sigma_bond**2,
-                    r0=1.5 * sigma_bond,
-                    epsilon=epsilon,
-                    sigma=sigma_bond,
-                    delta=0.0,
-                )
+                bond_template.params[bt] = {
+                    "k": 30.0 * epsilon / sigma_bond**2,
+                    "r0": 1.5 * sigma_bond,
+                    "epsilon": epsilon,
+                    "sigma": sigma_bond,
+                    "delta": 0.0,
+                }
         else:
             raise ValueError(
                 f"Incorrect argument {btype=}. Please use one of 'fene' or 'harmonic'."
@@ -273,7 +273,7 @@ def build_path_ff(
                 _, U, tau = angle_table_from_sampler(angle_sampler[at], table_width)
             else:
                 U = tau = np.zeros(table_width)
-            angle.params[at] = dict(U=U, tau=tau)
+            angle.params[at] = {"U": U, "tau": tau}
         forces.append(angle)
 
     if dihedral_sampler and snap.dihedrals.N > 0:
@@ -285,7 +285,7 @@ def build_path_ff(
                 )
             else:
                 U = tau = np.zeros(table_width)
-            dihedral.params[dt] = dict(U=U, tau=tau)
+            dihedral.params[dt] = {"U": U, "tau": tau}
         forces.append(dihedral)
 
     return forces

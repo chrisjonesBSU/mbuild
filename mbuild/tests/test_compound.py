@@ -1416,10 +1416,10 @@ class TestCompound(BaseTest):
         assert cube.n_bonds == len(shape.edges)
 
         indices = {id(p): i for i, p in enumerate(cube.particles())}
-        bonds = set(
+        bonds = {
             frozenset((indices[id(p1)], indices[id(p2)])) for p1, p2 in cube.bonds()
-        )
-        assert bonds == set(frozenset(edge) for edge in shape.edges)
+        }
+        assert bonds == {frozenset(edge) for edge in shape.edges}
 
         bond_lengths = [np.linalg.norm(p1.pos - p2.pos) for p1, p2 in cube.bonds()]
         assert np.allclose(max(bond_lengths), 0.5)

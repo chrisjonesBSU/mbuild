@@ -252,9 +252,9 @@ def _angle_force_constant(ti, tj, tk, r_ij, r_jk, theta0):
 
 def _hyb_of(label):
     """Return 'sp3' | 'sp2' | 'sp' | None from a UFF label suffix."""
-    if label.endswith("_3") or label.endswith("+2") or label.endswith("+3"):
+    if label.endswith(("_3", "+2", "+3")):
         return "sp3"
-    if label.endswith("_2") or label.endswith("_R"):
+    if label.endswith(("_2", "_R")):
         return "sp2"
     if label.endswith("_1"):
         return "sp"
@@ -323,7 +323,7 @@ def _hoomd_forces(top, snap, order_map, r_cut):
             # Geometric combining (UFF): r_min = sqrt(x_i x_j), D = sqrt(D_i D_j).
             sigma = math.sqrt(x1 * x2) / two_pow * ANG_TO_NM
             epsilon = math.sqrt(d1 * d2) * KCAL_TO_KJ
-            lj.params[(t1, t2)] = dict(sigma=sigma, epsilon=epsilon)
+            lj.params[(t1, t2)] = {"sigma": sigma, "epsilon": epsilon}
     forces = [lj]
 
     if top.n_bonds > 0:
@@ -339,7 +339,7 @@ def _hoomd_forces(top, snap, order_map, r_cut):
             order = order_between(i, j)
             r_ij = _bond_rest_length(key[0], key[1], order)
             k = _bond_force_constant(key[0], key[1], r_ij)
-            params = dict(k=k * BOND_K_TO_KJ_NM2, r0=r_ij * ANG_TO_NM)
+            params = {"k": k * BOND_K_TO_KJ_NM2, "r0": r_ij * ANG_TO_NM}
             # Register both orderings: the GSD snapshot's type-string ordering is
             # not guaranteed to match ours, and the potential is symmetric.
             _set_both(bond_force, (ti, tj), params, seen)
@@ -360,7 +360,7 @@ def _hoomd_forces(top, snap, order_map, r_cut):
             k_theta = _angle_force_constant(ti, tj, tk, r_ij, r_jk, theta0)
             # Linear centers (theta0=180) get a harmonic too: k_theta is finite
             # there, and HOOMD requires every angle type to be parameterized.
-            params = dict(k=k_theta * KCAL_TO_KJ, t0=theta0)
+            params = {"k": k_theta * KCAL_TO_KJ, "t0": theta0}
             _set_both(angle_force, (ti, tj, tk), params, seen)
         forces.append(angle_force)
 
@@ -387,7 +387,7 @@ def _hoomd_forces(top, snap, order_map, r_cut):
                 continue
             # No-op fallback: unhandled (sp centers etc.) or zero-barrier cases
             # still need a param entry or HOOMD raises on the missing type.
-            zero = dict(k=0.0, d=1, n=1, phi0=0.0)
+            zero = {"k": 0.0, "d": 1, "n": 1, "phi0": 0.0}
             tp = _torsion_params(tj, tk, order_between(j, k_idx))
             if tp is None:
                 _set_both(dihedral_force, (ti, tj, tk, tl), zero, seen)
@@ -400,12 +400,12 @@ def _hoomd_forces(top, snap, order_map, r_cut):
             # UFF: E = 0.5 V (1 - cos(n phi0) cos(n phi)).
             # HOOMD Periodic: E = k (1 + d cos(n phi - phi0)); phi0 = 0,
             # k = 0.5 V, d = -cos(n phi0) (which is +/-1).
-            params = dict(
-                k=0.5 * v * KCAL_TO_KJ,
-                d=int(round(-cos_n_phi0)),
-                n=n,
-                phi0=0.0,
-            )
+            params = {
+                "k": 0.5 * v * KCAL_TO_KJ,
+                "d": round(-cos_n_phi0),
+                "n": n,
+                "phi0": 0.0,
+            }
             _set_both(dihedral_force, (ti, tj, tk, tl), params, seen)
         forces.append(dihedral_force)
 

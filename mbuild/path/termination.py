@@ -57,12 +57,10 @@ class Termination:
 
     def is_met(self, coordinates, names):
         # Check required criteria first
-        if all([i.is_met(coordinates, names) for i in self.is_target]):
+        if all(i.is_met(coordinates, names) for i in self.is_target):
             self.success = True
             return True
-        if any([i.is_met(coordinates, names) for i in self.not_is_target]):
-            return True
-        return False
+        return bool(any(i.is_met(coordinates, names) for i in self.not_is_target))
 
     def summarize(self):
         """Print a quick summary of termination status."""

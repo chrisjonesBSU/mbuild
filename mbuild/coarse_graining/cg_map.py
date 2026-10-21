@@ -570,7 +570,7 @@ def _cover_component(component_graph, fragment_dict):
             return []
         target = min(uncovered)
         for embedding_index in by_atom[target]:
-            fragname, emb_atoms, descriptors = embeddings[embedding_index]
+            _fragname, emb_atoms, descriptors = embeddings[embedding_index]
             if not uncovered.issuperset(emb_atoms):
                 continue
             if not compatible_with_placed(emb_atoms, descriptors, atom_descriptors):

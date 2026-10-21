@@ -278,9 +278,9 @@ class Compound:
             raise ValueError(f"{child} is not a child in this compound's hiearchy.")
         parent_hashes = np.array([p.__hash__() for p in self.particles()])
         child_hashes = np.array([p.__hash__() for p in child.particles()])
-        matching_indices = list(
+        matching_indices = [
             int(np.where(parent_hashes == i)[0][0]) for i in child_hashes
-        )
+        ]
         return matching_indices
 
     @property

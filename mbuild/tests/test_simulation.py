@@ -322,7 +322,7 @@ class TestHoomdSimulation(BaseTest):
         """Test that only expected forces are active after cap_displacement."""
         fh = ForcesHandler(dpd=1, scale_bond=0.1, scale_angle=0)
         sim.cap_displacement(forces_handler=fh, dt=1, max_displacement=1, n_steps=10)
-        force_types = set(type(f) for f in sim.active_forces)
+        force_types = {type(f) for f in sim.active_forces}
         assert force_types == {hoomd.md.pair.DPDConservative, hoomd.md.bond.Harmonic}
 
     @pytest.mark.skipif(not has_hoomd, reason="hoomd is not installed")
@@ -722,7 +722,7 @@ class TestHoomdSimulation(BaseTest):
         with pytest.raises(TypeError, match="integrate_compounds"):
             HoomdSimulation(
                 system=octane,
-                integrate_compounds=[list(octane.particles())[0], 1],
+                integrate_compounds=[next(iter(octane.particles())), 1],
                 box_buffer=4,
                 run_on_gpu=False,
             )

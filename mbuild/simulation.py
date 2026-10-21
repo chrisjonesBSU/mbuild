@@ -587,7 +587,7 @@ class HoomdSimulation(hoomd.simulation.Simulation):
         lj_force = self._get_force(hoomd.md.pair.LJ)
         dpd = hoomd.md.pair.DPDConservative(nlist=lj_force.nlist)
         for param in lj_force.params:
-            dpd.params[param] = dict(A=A)
+            dpd.params[param] = {"A": A}
             dpd.r_cut[param] = lj_force.params[param]["sigma"]
         return dpd
 

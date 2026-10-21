@@ -1,3 +1,5 @@
+import itertools
+
 import networkx as nx
 import numpy as np
 import pytest
@@ -73,7 +75,7 @@ class TestCoarseGraining(BaseTest):
         from mbuild.coarse_graining import resolve
 
         path = straight_line(spacing=0.25, N=3, bead_name="PEO")
-        meta_graph, molecule, node_to_beads = resolve(path, "{#PEO=[>]COC[<]}")
+        _meta_graph, molecule, node_to_beads = resolve(path, "{#PEO=[>]COC[<]}")
         elements = nx.get_node_attributes(molecule, "element")
         assert sum(1 for e in elements.values() if e == "C") == 6
         assert sum(1 for e in elements.values() if e == "O") == 3
@@ -760,7 +762,7 @@ class TestCoarseGraining(BaseTest):
         chain = mb.Compound(name="CG")
         beads = [mb.Compound(name="A", pos=[0.3 * i, 0, 0]) for i in range(3)]
         chain.add(beads)
-        for b1, b2 in zip(beads[:-1], beads[1:]):
+        for b1, b2 in itertools.pairwise(beads):
             chain.add_bond((b1, b2))
         # CG beads carry no element, so their mass is 0/None, not usable
         with pytest.raises(ValueError, match="mass"):

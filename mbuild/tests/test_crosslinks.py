@@ -494,7 +494,7 @@ class TestCrosslink(BaseTest):
             minimum_intrachain_depth=2,
         )
         assert len(parallel_chains.bond_graph.edges()) == 7
-        edges = set(list(parallel_chains.bond_graph.edges()))
+        edges = set(parallel_chains.bond_graph.edges())
         for edge in [(0, 1), (1, 2), (3, 4), (4, 5), (0, 3), (1, 4), (2, 5)]:
             assert edge in edges
 
@@ -521,7 +521,7 @@ class TestCrosslink(BaseTest):
             tolerance=0,
         )
         assert len(path1.bond_graph.edges()) == 8
-        edges = set(list(path1.bond_graph.edges()))
+        edges = set(path1.bond_graph.edges())
         for edge in [(0, 1), (1, 2), (2, 3), (4, 5), (5, 6), (6, 7), (1, 5), (2, 6)]:
             assert edge in edges
         with pytest.raises(PathConvergenceError):
@@ -545,7 +545,7 @@ class TestCrosslink(BaseTest):
             tolerance=0,
         )
         assert len(path3.bond_graph.edges()) == 8
-        edges = set(list(path3.bond_graph.edges()))
+        edges = set(path3.bond_graph.edges())
         for edge in [(0, 1), (1, 2), (2, 3), (4, 5), (5, 6), (6, 7), (1, 5), (2, 6)]:
             assert edge in edges
 

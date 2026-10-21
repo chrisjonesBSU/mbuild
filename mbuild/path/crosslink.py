@@ -659,9 +659,7 @@ def _filter_initial_backbones(path, backbone_name, backbone_degree):
     out other features of backbones.
     """
     if isinstance(backbone_name, str):
-        backbone_namesSet = set(
-            (backbone_name,)
-        )  # every connection bond to same crosslink
+        backbone_namesSet = {backbone_name}  # every connection bond to same crosslink
     elif backbone_name is None:
         pass  # skip nonetype formatting
     else:

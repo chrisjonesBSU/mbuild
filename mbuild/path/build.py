@@ -3,7 +3,7 @@
 import logging
 import math
 import time
-from itertools import combinations_with_replacement
+from itertools import combinations_with_replacement, pairwise
 
 import networkx as nx
 import numpy as np
@@ -233,16 +233,16 @@ class Path:
         if connectivity == "disconnected":
             return
         elif connectivity == "linear":
-            for idx1, idx in zip(indices, indices[1:]):
+            for idx1, idx in pairwise(indices):
                 self.add_edge(idx1, idx)
         elif connectivity == "link-linear":
-            for idx1, idx in zip(indices, indices[1:]):
+            for idx1, idx in pairwise(indices):
                 self.add_edge(idx1, idx)
             if attach_index in self.bond_graph.nodes:
                 # link to previous node
                 self.add_edge(attach_index, indices[0])
         elif connectivity == "cycle":
-            for idx1, idx in zip(indices, indices[1:]):
+            for idx1, idx in pairwise(indices):
                 self.add_edge(idx1, idx)
             self.add_edge(indices[0], indices[-1])
         else:
@@ -273,7 +273,7 @@ class Path:
                 xyz=self.coordinates[indices[0]],
             )
 
-        for idx1, idx in zip(indices, indices[1:]):
+        for idx1, idx in pairwise(indices):
             if idx >= n_coords:
                 raise ValueError(
                     f"Index {idx=} is out of bounds for Path with {n_coords}"
@@ -1362,7 +1362,7 @@ def hard_sphere_random_walk(
         )
     elif isinstance(termination, int):
         termination = Termination(NumSites(termination))
-    elif isinstance(termination, (tuple, list)) or isinstance(termination, Terminator):
+    elif isinstance(termination, (tuple, list, Terminator)):
         termination = Termination(termination)
     elif not isinstance(termination, Termination):
         raise ValueError(f"Bad input {termination=} to hard_sphere_random_walk")
@@ -1401,7 +1401,7 @@ def hard_sphere_random_walk(
 
     # Initialize coordinates based on starting conditions
     # The path used for this random walk contains previous sites
-    if not path.coordinates.size == 0:
+    if path.coordinates.size != 0:
         coordinates = np.concatenate(
             (
                 path.coordinates.astype(np.float32),

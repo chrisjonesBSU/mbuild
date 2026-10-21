@@ -80,12 +80,12 @@ class TestPaths(BaseTest):
         """Every builder places its first site at initial_point."""
         initial_point = (1.5, -2.0, 3.0)
         builders = [
-            (straight_line, dict(spacing=0.25, N=10)),
-            (cyclic, dict(spacing=0.25, N=20)),
-            (knot, dict(spacing=0.25, N=40, m=3)),
-            (spiral_2D, dict(N=30, a=0.5, b=0.1, spacing=0.25)),
-            (zigzag, dict(N=20, spacing=0.25)),
-            (helix, dict(N=30, radius=0.5, rise=0.1, twist=30)),
+            (straight_line, {"spacing": 0.25, "N": 10}),
+            (cyclic, {"spacing": 0.25, "N": 20}),
+            (knot, {"spacing": 0.25, "N": 40, "m": 3}),
+            (spiral_2D, {"N": 30, "a": 0.5, "b": 0.1, "spacing": 0.25}),
+            (zigzag, {"N": 20, "spacing": 0.25}),
+            (helix, {"N": 30, "radius": 0.5, "rise": 0.1, "twist": 30}),
         ]
         for builder, kwargs in builders:
             at_origin = builder(**kwargs).coordinates
@@ -383,7 +383,7 @@ class TestRandomWalk(BaseTest):
                         termination=term,
                         seed=i,
                         initial_point=initial_points[attempt],
-                        rw_angles=AnglesSampler("normal", dict(loc=2.4, scale=1)),
+                        rw_angles=AnglesSampler("normal", {"loc": 2.4, "scale": 1}),
                         tolerance=tolerance,
                     )
                     if term.success:
@@ -499,8 +499,8 @@ class TestRandomWalk(BaseTest):
     def test_seeds_user_angles_sampler(self):
         # A reused, stateful user sampler is still driven by the walk's seed,
         # so same-seed walks reproduce.
-        sampler = AnglesSampler("normal", dict(loc=2.4, scale=0.3))
-        kwargs = dict(bond_length=0.25, radius=0.22, rw_angles=sampler, seed=14)
+        sampler = AnglesSampler("normal", {"loc": 2.4, "scale": 0.3})
+        kwargs = {"bond_length": 0.25, "radius": 0.22, "rw_angles": sampler, "seed": 14}
         path1 = Path()
         hard_sphere_random_walk(
             path=path1,
@@ -518,7 +518,7 @@ class TestRandomWalk(BaseTest):
     def test_seeds_random_namer(self):
         # An unseeded stochastic namer is driven by the walk's seed, so
         # same-seed walks reproduce both names and coordinates.
-        kwargs = dict(radius=0.1, bond_length=0.15, termination=20, seed=42)
+        kwargs = {"radius": 0.1, "bond_length": 0.15, "termination": 20, "seed": 42}
         path1 = hard_sphere_random_walk(bead_name=RandomNamer(["_A", "_B"]), **kwargs)
         path2 = hard_sphere_random_walk(bead_name=RandomNamer(["_A", "_B"]), **kwargs)
         assert list(path1.beads) == list(path2.beads)
@@ -743,7 +743,7 @@ class TestRandomWalk(BaseTest):
             bond_length=1.5,
             termination=1,
         )
-        assert all([np.abs(coord) <= 1 for coord in path.coordinates[0]])
+        assert all(np.abs(coord) <= 1 for coord in path.coordinates[0])
 
         # specific starting point
         path = hard_sphere_random_walk(
@@ -776,7 +776,7 @@ class TestRandomWalk(BaseTest):
             termination=1,
         )
         assert all(constraint.is_inside(points=path.coordinates, buffer=0.1))
-        assert all([np.abs(coord) < 1 / 2 for coord in path.coordinates[0]])
+        assert all(np.abs(coord) < 1 / 2 for coord in path.coordinates[0])
 
         constraint = CuboidConstraint.from_array([1, 1, 1], center=(-0.5, -0.5, -0.5))
         path = hard_sphere_random_walk(
@@ -791,7 +791,7 @@ class TestRandomWalk(BaseTest):
         assert np.allclose(path.coordinates[0], np.array([-0.25, -0.25, -0.25]))
         assert all(constraint.is_inside(points=path.coordinates[1:], buffer=0.1))
         for coord in path.coordinates[1:]:
-            assert all([x < 0 for x in coord])
+            assert all(x < 0 for x in coord)
 
     def test_rw_normal_angles(self):
         from scipy.stats import normaltest
@@ -939,13 +939,13 @@ class TestRandomWalk(BaseTest):
     def test_angle_range_against_radius(
         self, bond_length, radius, rw_angles, expected, caplog
     ):
-        kwargs = dict(
-            bond_length=bond_length,
-            radius=radius,
-            rw_angles=rw_angles,
-            termination=30,
-            seed=1,
-        )
+        kwargs = {
+            "bond_length": bond_length,
+            "radius": radius,
+            "rw_angles": rw_angles,
+            "termination": 30,
+            "seed": 1,
+        }
         if expected == "raise":
             with pytest.raises(ValueError):
                 hard_sphere_random_walk(**kwargs)

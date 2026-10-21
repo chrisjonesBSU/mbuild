@@ -91,7 +91,7 @@ def visualize_compound(
     compound,
     show_ports=False,
     backend="py3dmol",
-    color_scheme={},
+    color_scheme=None,
     bead_size=0.3,
     periodic_bond_opacity=False,
 ):  # pragma: no cover
@@ -119,6 +119,8 @@ def visualize_compound(
         Specify as a float from 0 to 1 to set the bond opacity
         for bonds that cross periodic boundaries.
     """
+    if color_scheme is None:
+        color_scheme = {}
     viz_pkg = {
         "nglview": _visualize_nglview,
         "py3dmol": _visualize_py3dmol,
@@ -148,7 +150,7 @@ def visualize_compound(
 def _visualize_py3dmol(
     compound,
     show_ports=False,
-    color_scheme={},
+    color_scheme=None,
     bead_size=0.3,
     periodic_bond_opacity=False,
 ):
@@ -175,6 +177,8 @@ def _visualize_py3dmol(
     -------
     view : py3Dmol.view
     """
+    if color_scheme is None:
+        color_scheme = {}
     py3Dmol = import_("py3Dmol")
 
     clone_of = {}
@@ -311,7 +315,7 @@ def _visualize_nglview(compound, show_ports=False):
     widget = nglview.show_file(os.path.join(tmp_dir, "tmp.mol2"))
     widget.clear()
     widget.add_ball_and_stick(cylinderOnly=True)
-    elements = set([particle.name for particle in compound.particles()])
+    elements = {particle.name for particle in compound.particles()}
     scale = 50.0
     for element in elements:
         try:

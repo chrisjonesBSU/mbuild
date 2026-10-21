@@ -5,7 +5,7 @@ def to_mol2(path):
     mol2_lines = []
 
     # Get unique names and create mapping
-    unique_names = list(set(G.nodes[node]["name"] for node in G.nodes()))
+    unique_names = list({G.nodes[node]["name"] for node in G.nodes()})
     node_to_atom = {node: atom_num for atom_num, node in enumerate(G.nodes(), start=1)}
 
     n_atoms = len(G.nodes())
