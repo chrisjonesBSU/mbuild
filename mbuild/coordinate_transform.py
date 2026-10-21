@@ -62,23 +62,22 @@ def force_overlap(
     atom_positions = T.apply_to(atom_positions)
     move_this.xyz_with_ports = atom_positions
 
-    if add_bond:
-        if isinstance(from_positions, Port) and isinstance(to_positions, Port):
-            if not from_positions.anchor or not to_positions.anchor:
-                logger.warning("Attempting to form bond from port that has no anchor")
-            else:
-                from_positions.anchor.parent.add_bond(
-                    (from_positions.anchor, to_positions.anchor), bond_order=bond_order
-                )
-                to_positions.anchor.parent.add_bond(
-                    (from_positions.anchor, to_positions.anchor), bond_order=bond_order
-                )
-                from_positions.anchor.parent.remove(
-                    from_positions, reset_labels=reset_labels
-                )
-                to_positions.anchor.parent.remove(
-                    to_positions, reset_labels=reset_labels
-                )
+    if add_bond and (
+        isinstance(from_positions, Port) and isinstance(to_positions, Port)
+    ):
+        if not from_positions.anchor or not to_positions.anchor:
+            logger.warning("Attempting to form bond from port that has no anchor")
+        else:
+            from_positions.anchor.parent.add_bond(
+                (from_positions.anchor, to_positions.anchor), bond_order=bond_order
+            )
+            to_positions.anchor.parent.add_bond(
+                (from_positions.anchor, to_positions.anchor), bond_order=bond_order
+            )
+            from_positions.anchor.parent.remove(
+                from_positions, reset_labels=reset_labels
+            )
+            to_positions.anchor.parent.remove(to_positions, reset_labels=reset_labels)
 
 
 class CoordinateTransform:

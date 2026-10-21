@@ -65,9 +65,9 @@ def check_path(
     new_point,
     radius,
     tolerance,
-    pbc=np.array([False, False, False], dtype=bool),
-    box_lengths=np.array([np.inf, np.inf, np.inf], dtype=np.float32),
-    excluded_indices=np.empty(0, dtype=np.int64),
+    pbc=None,
+    box_lengths=None,
+    excluded_indices=None,
 ):
     """Default check path method for HardSphereRandomWalk.
 
@@ -100,6 +100,14 @@ def check_path(
     """
     if existing_points is None or existing_points.size == 0:
         return True
+    # Set defaults for these params
+    if pbc is None:
+        pbc = np.array([False, False, False], dtype=np.bool_)
+    if box_lengths is None:
+        box_lengths = np.array([np.inf, np.inf, np.inf], dtype=np.float32)
+    if excluded_indices is None:
+        excluded_indices = np.empty(0, dtype=np.int64)
+
     min_sq_dist = (radius - tolerance) ** 2
     n_excluded = excluded_indices.shape[0]
     next_excluded = 0  # counter to increment along excluded_indices, which is sorted
@@ -127,10 +135,14 @@ def check_path(
 def target_sq_distances(
     target_coordinate,
     new_points,
-    pbc=np.array([False, False, False], dtype=bool),
-    box_lengths=np.array([np.inf, np.inf, np.inf], dtype=np.float32),
+    pbc=None,
+    box_lengths=None,
 ):
     """Return squared distances from target_coordinate to new_points."""
+    if pbc is None:
+        pbc = np.array([False, False, False], dtype=np.bool_)
+    if box_lengths is None:
+        box_lengths = np.array([np.inf, np.inf, np.inf], dtype=np.float32)
     n_points = new_points.shape[0]
     sq_distances = np.empty(n_points, dtype=np.float32)
     for i in range(n_points):
@@ -213,8 +225,8 @@ def rotate_vector(v, axis, theta):
 def calculate_sq_distances(
     target_coordinate,
     new_points,
-    pbc=np.array([False, False, False], dtype=bool),
-    box_lengths=np.array([np.inf, np.inf, np.inf], dtype=np.float32),
+    pbc=None,
+    box_lengths=None,
 ):
     """
     Return squared distances from target_coordinate to new_points.
@@ -235,6 +247,10 @@ def calculate_sq_distances(
     np.ndarray
         Squared distances from target to each point in new_points
     """
+    if pbc is None:
+        pbc = np.array([False, False, False], dtype=np.bool_)
+    if box_lengths is None:
+        box_lengths = np.array([np.inf, np.inf, np.inf], dtype=np.float32)
     n_points = new_points.shape[0]
     sq_distances = np.empty(n_points, dtype=np.float32)
     for i in range(n_points):
@@ -257,8 +273,8 @@ def find_candidates_within_radius(
     target_coordinate,
     candidate_points,
     radius,
-    pbc=np.array([False, False, False], dtype=bool),
-    box_lengths=np.array([np.inf, np.inf, np.inf], dtype=np.float32),
+    pbc=None,
+    box_lengths=None,
 ):
     """
     Find indices of candidate points within radius of target coordinate.
@@ -281,6 +297,10 @@ def find_candidates_within_radius(
     np.ndarray
         Boolean mask of points within radius
     """
+    if pbc is None:
+        pbc = np.array([False, False, False], dtype=np.bool_)
+    if box_lengths is None:
+        box_lengths = np.array([np.inf, np.inf, np.inf], dtype=np.float32)
     n_points = candidate_points.shape[0]
     r2_cut = radius * radius
     within_radius = np.empty(n_points, dtype=np.bool_)

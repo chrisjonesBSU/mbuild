@@ -99,7 +99,7 @@ class Polymer(Compound):
         self._monomer_bond_orders = [1 for i in self._monomers]
         self._end_group_bond_orders = [1 for i in self._end_groups]
         if not isinstance(self._end_groups, list):
-            raise ValueError(
+            raise TypeError(
                 "Please provide two end groups in a list; "
                 f"you provided {self._end_groups}"
             )

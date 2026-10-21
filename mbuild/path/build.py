@@ -558,12 +558,10 @@ class Path:
         print(f"Min bond length: {min(bond_lengths.values()):.4f}")
         print(f"Max bond length: {max(bond_lengths.values()):.4f}")
         print(f"Mean bond length: {np.mean(list(bond_lengths.values())):.4f}")
-        for key in bond_typesDict:
-            if not len(bond_typesDict[key]):
+        for key, value in bond_typesDict.items():
+            if not len(value):
                 continue
-            print(
-                f"{key}: Max={max(bond_typesDict[key]):.2f}, Min={min(bond_typesDict[key]):.2f}"
-            )
+            print(f"{key}: Max={max(value):.2f}, Min={min(value):.2f}")
 
         return bond_lengths, bond_typesDict
 
@@ -633,11 +631,11 @@ class Path:
         print(f"Min angle: {min(angles.values()):.2f}°")
         print(f"Max angle: {max(angles.values()):.2f}°")
         print(f"Mean angle: {np.mean(list(angles.values())):.2f}°")
-        for key in angle_typesDict:
-            if not len(angle_typesDict[key]):
+        for key, value in angle_typesDict.items():
+            if not len(value):
                 continue
             print(
-                f"{key}: Max={max(angle_typesDict[key]):.2f}°, Min={min(angle_typesDict[key]):.2f}°, Mean={np.mean(angle_typesDict[key]):.2f}°"
+                f"{key}: Max={max(value):.2f}°, Min={min(value):.2f}°, Mean={np.mean(value):.2f}°"
             )
 
         return angles, angle_typesDict

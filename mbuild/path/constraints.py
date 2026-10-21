@@ -410,9 +410,10 @@ def is_inside_cuboid(mins, maxs, points, buffer, pbc):
     for i in range(n_points):
         inside = True
         for j in range(3):
-            if not pbc[j]:
-                if points[i, j] - buffer < mins[j] or points[i, j] + buffer > maxs[j]:
-                    inside = False
-                    break
+            if not pbc[j] and (
+                points[i, j] - buffer < mins[j] or points[i, j] + buffer > maxs[j]
+            ):
+                inside = False
+                break
         results[i] = inside
     return results
