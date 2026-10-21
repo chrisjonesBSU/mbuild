@@ -2535,7 +2535,7 @@ class TestCompound(BaseTest):
         shifted_pos, freud_box = methane.to_freud()
         assert freud_box.Lx == freud_box.Ly == freud_box.Lz == 2.0
 
-    tagged_smiles_groups = [
+    tagged_smiles_groups = (
         ("C", "C{tag}"),
         ("CCCC", "C{tag}CCC"),
         ("c1ccccc1", "c{tag}1ccccc1"),
@@ -2573,7 +2573,7 @@ class TestCompound(BaseTest):
         ("c1cnc[nH]1", "c{tag}1cnc[nH]1"),
         ("c1ccncc1O", "c{tag}1ccncc1O"),
         ("c1ccncc1C(=O)O", "c{tag}1ccncc1C(=O)O"),
-    ]
+    )
 
     @pytest.mark.parametrize("smiles_group", tagged_smiles_groups)
     def test_load_tagged_smiles(self, smiles_group):

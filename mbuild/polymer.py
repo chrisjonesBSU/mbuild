@@ -530,8 +530,7 @@ class Polymer(Compound):
         comp.add(head_port, label="up")
 
         if remove_hydrogens:
-            for p in head_hydrogens[:bond_order]:
-                _remove_hydrogens.append(p)
+            _remove_hydrogens.extend(head_hydrogens[:bond_order])
 
         tail = [p for p in comp.particles() if p.particle_tag == tail_tag]
         if len(tail) == 0:
@@ -562,8 +561,7 @@ class Polymer(Compound):
         comp.add(tail_port, label="down")
 
         if remove_hydrogens:
-            for p in tail_hydrogens[:bond_order]:
-                _remove_hydrogens.append(p)
+            _remove_hydrogens.extend(tail_hydrogens[:bond_order])
 
         comp.remove(_remove_hydrogens)
         # remove excess hydrogen ports
@@ -659,8 +657,7 @@ class Polymer(Compound):
         )
         comp.add(head_port, label="up")
         if remove_hydrogens:
-            for p in head_hydrogens[:bond_order]:
-                _remove_hydrogens.append(p)
+            _remove_hydrogens.extend(head_hydrogens[:bond_order])
 
         comp.remove(_remove_hydrogens)
 

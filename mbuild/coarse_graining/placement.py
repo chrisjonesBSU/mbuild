@@ -363,13 +363,18 @@ def _embed_fragment(elements, charges, edges, seed):
 
     fragment = fragment.GetMol()
     Chem.SanitizeMol(fragment)
-    if AllChem.EmbedMolecule(fragment, randomSeed=seed) != 0:
-        if AllChem.EmbedMolecule(fragment, randomSeed=seed, useRandomCoords=True) != 0:
-            raise ValueError(f"RDKit failed to embed fragment {elements}.")
-    try:
+    if (
+        AllChem.EmbedMolecule(fragment, randomSeed=seed) != 0
+        and AllChem.EmbedMolecule(fragment, randomSeed=seed, useRandomCoords=True) != 0
+    ):
+        raise ValueError(f"RDKit failed to embed fragment {elements}.")
+    # UFF parameters can be missing; keep raw DG coordinates in that case
+    if AllChem.UFFHasAllMoleculeParams(fragment):
         AllChem.UFFOptimizeMolecule(fragment)
-    except Exception:  # UFF parameters can be missing; keep raw DG coordinates
-        pass
+    else:
+        logger.debug(
+            f"Missing UFF parameters for fragment {elements}; skipping optimization."
+        )
 
     # Angstrom -> nm
     xyz = fragment.GetConformer().GetPositions() / 10.0
