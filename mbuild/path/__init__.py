@@ -7,6 +7,8 @@ from .build import (
     helix,
     knot,
     lamellar,
+    spherulite,
+    spherulite_wedge,
     spiral_2D,
     straight_line,
     zigzag,

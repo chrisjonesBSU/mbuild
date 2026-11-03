@@ -10,6 +10,8 @@ from mbuild.path.build import (
     helix,
     knot,
     lamellar,
+    spherulite,
+    spherulite_wedge,
     spiral_2D,
     straight_line,
     zigzag,
@@ -34,6 +36,12 @@ from mbuild.path.termination import (
 )
 from mbuild.tests.base_test import BaseTest
 from mbuild.utils.geometry import bounding_box
+
+
+def nx_components(path):
+    import networkx as nx
+
+    return nx.number_connected_components(path.bond_graph)
 
 
 class TestPaths(BaseTest):
@@ -172,6 +180,40 @@ class TestPaths(BaseTest):
         # Y-direction will be slightly larger because of curves between layers
         assert np.allclose(Lx, Lz, atol=0.1)  # stacking and layering directions
         assert Ly > Lx
+
+    def test_spherulite_wedge(self):
+        spacing = 0.3
+        path = Path()
+        spherulite_wedge(
+            path=path,
+            half_angle=np.pi / 8,
+            num_layers=6,
+            layer_separation=0.5,
+            spacing=spacing,
+            inner_radius=2.0,
+        )
+        assert path.bond_graph.number_of_edges() == len(path.coordinates) - 1
+        bonds = np.linalg.norm(np.diff(path.coordinates, axis=0), axis=1)
+        # Resampling gives near uniform spacing (chords are slightly short on curves)
+        assert np.all(bonds <= spacing + 1e-9)
+        assert np.all(bonds > 0.9 * spacing)
+        radii = np.linalg.norm(path.coordinates[:, :2], axis=1)
+        assert radii.min() >= 2.0 - 1e-3
+        assert radii.max() <= 2.0 + 5 * 0.5 + 1e-3  # outermost layer
+
+    def test_spherulite_arms_and_seed(self):
+        path = Path()
+        spherulite(
+            path=path, num_arms=4, num_layers=4, spacing=0.3, jitter=0.02, seed=7
+        )
+        assert nx_components(path) == 4  # one chain per arm
+        again = Path()
+        spherulite(
+            path=again, num_arms=4, num_layers=4, spacing=0.3, jitter=0.02, seed=7
+        )
+        assert np.array_equal(path.coordinates, again.coordinates)
+        with pytest.raises(ValueError):
+            spherulite(num_arms=4, wedge_fraction=1.5)
 
     def test_lamellar_direction(self):
         path_left_to_right = Path()
