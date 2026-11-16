@@ -14,6 +14,7 @@ from mbuild.path.build import (
     zigzag,
 )
 from mbuild.path.constraints import (
+    CrackConstraint,
     CuboidConstraint,
     CylinderConstraint,
     SphereConstraint,
@@ -734,6 +735,32 @@ class TestRandomWalk(BaseTest):
         r = np.linalg.norm(path.coordinates[:, :2] - np.array([1, 1]), axis=1)
         assert np.all(r >= 1.5)
         assert np.all(r <= 3)
+
+    @pytest.mark.parametrize("surface", [None, "min"])
+    def test_walk_around_crack(self, surface):
+        path = Path()
+        box = CrackConstraint(
+            6,
+            pbc=(False, True, True),
+            crack_length=2.5,
+            tip_radius=0.5,
+            crack_width=np.inf,
+            surface=surface,
+        )
+        a, _, c = box.crack_semi_axes
+        hard_sphere_random_walk(
+            path=path,
+            termination=Termination([NumSites(300), NumAttempts(1e4)]),
+            bond_length=0.25,
+            radius=0.22,
+            volume_constraint=box,
+            initial_point=box.crack_center + np.array([a + 0.4, 0, 0]),
+            seed=2,
+        )
+        assert len(path.coordinates) == 300
+        dx = path.coordinates[:, 0] - box.crack_center[0]
+        dz = path.coordinates[:, 2] - box.crack_center[2]
+        assert np.all((dx / a) ** 2 + (dz / c) ** 2 > 1)
 
     @pytest.mark.parametrize("a_len, b_len", [(2, 3), (3, 5), (4, 4)])
     def test_multiple_paths(self, a_len, b_len):

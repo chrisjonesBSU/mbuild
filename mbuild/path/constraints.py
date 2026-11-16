@@ -404,6 +404,136 @@ class CylinderConstraint(Constraint):
         return candidates[sorted_order]
 
 
+_AXES = {"x": 0, "y": 1, "z": 2}
+
+
+class CrackConstraint(CuboidConstraint):
+    """Creates a cuboid constraint with an ellipsoidal crack excluded from it.
+
+    The crack is an ellipsoid with semi-axes ``crack_length`` along ``crack_axis``,
+    ``sqrt(crack_length * tip_radius)`` along ``crack_normal`` and ``crack_width``
+    along the remaining axis.
+
+    Parameters
+    ----------
+    Lx, Ly, Lz, center, pbc :
+        See CuboidConstraint.
+    crack_length : float, required
+        Semi-axis of the crack along ``crack_axis``. For a surface crack this is
+        the depth of the crack into the box.
+    tip_radius : float, required
+        Radius of curvature at the crack tip.
+    crack_width : float, optional
+        Semi-axis of the crack along the remaining axis. Defaults to
+        ``crack_length``. Use ``np.inf`` for a crack through the whole box.
+    crack_axis : str, default "x"
+        Axis the crack length runs along.
+    crack_normal : str, default "z"
+        Axis the crack opens along.
+    crack_center : array-like (3,), optional
+        Center of the crack. Defaults to ``center``.
+    surface : str, optional
+        "min" or "max". Moves the crack center onto that face of the box along
+        ``crack_axis``, giving a surface crack. That axis must not be periodic.
+    """
+
+    def __init__(
+        self,
+        Lx,
+        Ly=None,
+        Lz=None,
+        center=(0, 0, 0),
+        pbc=(False, False, False),
+        *,
+        crack_length,
+        tip_radius,
+        crack_width=None,
+        crack_axis="x",
+        crack_normal="z",
+        crack_center=None,
+        surface=None,
+    ):
+        super().__init__(Lx, Ly, Lz, center=center, pbc=pbc)
+        if crack_axis not in _AXES or crack_normal not in _AXES:
+            raise ValueError("crack_axis and crack_normal must be 'x', 'y' or 'z'.")
+        if crack_axis == crack_normal:
+            raise ValueError("crack_axis and crack_normal must be different.")
+        if crack_width is None:
+            crack_width = crack_length
+        if min(crack_length, tip_radius, crack_width) <= 0:
+            raise ValueError(
+                "crack_length, tip_radius and crack_width must be positive."
+            )
+        axis = _AXES[crack_axis]
+        normal = _AXES[crack_normal]
+        self.crack_semi_axes = np.empty(3)
+        self.crack_semi_axes[axis] = crack_length
+        self.crack_semi_axes[normal] = np.sqrt(crack_length * tip_radius)
+        self.crack_semi_axes[3 - axis - normal] = crack_width
+        self.crack_center = np.array(
+            self.center if crack_center is None else crack_center, dtype=np.float64
+        )
+        if surface is not None:
+            if surface not in ("min", "max"):
+                raise ValueError("surface must be None, 'min' or 'max'.")
+            if self.pbc[axis]:
+                raise ValueError("A surface crack requires a non-periodic crack_axis.")
+            face = self.mins if surface == "min" else self.maxs
+            self.crack_center[axis] = face[axis]
+        self.tip_radius = tip_radius
+        self.surface = surface
+
+    def is_inside(self, points, buffer):
+        """Check a set of coordinates against the volume constraint.
+
+        Parameters
+        ----------
+        points : ndarray (N, 3), required
+            The set of points to check against the volume constraint.
+        buffer : float, required
+            Buffer used for rounding
+
+        Returns
+        -------
+        Mask of booleans of length N corresponding to each point.
+        """
+        in_box = super().is_inside(points, buffer)
+        in_crack = is_inside_ellipsoid(
+            points=points,
+            center=self.crack_center,
+            inv_semi_axes=1.0 / (self.crack_semi_axes + buffer),
+            box_lengths=self.box_lengths.astype(np.float64),
+            pbc=self.pbc,
+        )
+        return in_box & ~in_crack
+
+    def sample_candidates(self, points, n_candidates, buffer, k=10, rng=None):
+        """Sample candidates from the box, dropping those inside the crack.
+
+        See CuboidConstraint.sample_candidates.
+        """
+        candidates = super().sample_candidates(
+            points=points, n_candidates=2 * n_candidates, buffer=buffer, k=k, rng=rng
+        )
+        return candidates[self.is_inside(candidates, buffer)][:n_candidates]
+
+
+@njit(cache=True, fastmath=True)
+def is_inside_ellipsoid(points, center, inv_semi_axes, box_lengths, pbc):
+    n_points = points.shape[0]
+    results = np.empty(n_points, dtype=np.bool_)
+    for i in range(n_points):
+        dist_sq = 0.0
+        for j in range(3):
+            d = points[i, j] - center[j]
+            if pbc[j]:
+                d -= box_lengths[j] * np.round(d / box_lengths[j])
+            d *= inv_semi_axes[j]
+            dist_sq += d * d
+        results[i] = dist_sq <= 1.0
+    return results
+
+
 @njit(cache=True, fastmath=True)
 def is_inside_cylinder(
     points, center, cylinder_radius, inner_radius, height, buffer, periodic
