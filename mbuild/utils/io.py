@@ -361,6 +361,14 @@ try:
 except ImportError:
     has_coxeter = False
 
+try:
+    import sympy
+
+    has_sympy = True
+    del sympy
+except ImportError:
+    has_sympy = False
+
 
 def get_fn(name):
     """Get the full path to one of the reference files shipped for utils.

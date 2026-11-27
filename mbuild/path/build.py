@@ -15,6 +15,7 @@ from scipy.interpolate import interp1d
 
 from mbuild import Box, Compound
 from mbuild.exceptions import PathConvergenceError
+from mbuild.path.angles import AnglesSampler
 from mbuild.path.constraints import CuboidConstraint, CylinderConstraint
 from mbuild.path.namers import BEAD_NAME_DTYPE, BeadNamer
 from mbuild.path.path_utils import (
@@ -23,7 +24,6 @@ from mbuild.path.path_utils import (
     random_coordinate,
 )
 from mbuild.path.points import (
-    AnglesSampler,
     generate_trials,
     get_initial_point,
     get_second_point,
@@ -516,7 +516,7 @@ class Path:
         btype : str, optional, default='harmonic'
             Which bond type to use by default. Harmonic bonds are useful when the current
             bond_length distribution is far from the bond_length target.
-        angles_sampler : mbuild.path.points.AnglesSampler or dict, optional
+        angles_sampler : mbuild.path.angles.AnglesSampler or dict, optional
             If given, adds a tabulated angle potential. A dict keyed by a
             bead-type triple parameterizes angles per type.
         steps : int, optional, default 1,000
@@ -1685,7 +1685,7 @@ class RandomWalkState:
         else:
             raise ValueError(
                 f"{angles_sampler} is not a supported form to sample angles. "
-                "See mbuild.path.points.AnglesSampler."
+                "See mbuild.path.angles.AnglesSampler."
             )
         self.bead_name = bead_name
         self.initial_point, self.starting_from_site = _normalize_initial_point(

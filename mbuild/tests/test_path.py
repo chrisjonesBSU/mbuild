@@ -3,6 +3,7 @@ import pytest
 
 import mbuild as mb
 from mbuild.exceptions import PathConvergenceError
+from mbuild.path.angles import AnglesSampler
 from mbuild.path.build import (
     Path,
     cyclic,
@@ -25,7 +26,6 @@ from mbuild.path.path_utils import (
     target_density,
     target_sq_distances,
 )
-from mbuild.path.points import AnglesSampler
 from mbuild.path.termination import (
     NumAttempts,
     NumSites,
@@ -33,6 +33,7 @@ from mbuild.path.termination import (
 )
 from mbuild.tests.base_test import BaseTest
 from mbuild.utils.geometry import bounding_box
+from mbuild.utils.io import has_sympy
 
 
 class TestPaths(BaseTest):
@@ -1185,7 +1186,7 @@ class TestPathUtils(BaseTest):
     def test_angles_sampler(self, distribution, kwargs, reference):
         import scipy.stats
 
-        from mbuild.path.points import AnglesSampler
+        from mbuild.path.angles import AnglesSampler
 
         sampler = AnglesSampler(distribution, kwargs, rng=np.random.default_rng(0))
         points = sampler.sample(1000)
@@ -1195,6 +1196,84 @@ class TestPathUtils(BaseTest):
             _, p_value = scipy.stats.normaltest(points)
 
         assert p_value > 0.05
+
+    @pytest.mark.skipif(not has_sympy, reason="sympy is not installed")
+    def test_harmonic_angle_matches_boltzmann(self):
+        import scipy.stats
+
+        from mbuild.path.angles import HarmonicAngle
+
+        theta_eq, k, kT = 2.0, 20.0, 1.5
+        sampler = HarmonicAngle(theta_eq, k, kT=kT, rng=np.random.default_rng(0))
+        samples = sampler.sample(5000)
+        assert samples.min() >= 0 and samples.max() <= np.pi
+
+        grid = np.linspace(0, np.pi, 20001)
+        pdf = np.sin(grid) * np.exp(-0.5 * k * (grid - theta_eq) ** 2 / kT)
+        cdf = np.cumsum(pdf) / pdf.sum()
+        _, p_value = scipy.stats.kstest(samples, lambda x: np.interp(x, grid, cdf))
+        assert p_value > 0.05
+
+    @pytest.mark.skipif(not has_sympy, reason="sympy is not installed")
+    def test_boltzmann_angle_custom_expression(self):
+        from mbuild.path.angles import BoltzmannAngle, HarmonicAngle
+
+        harmonic = HarmonicAngle(2.0, 20.0)
+        custom = BoltzmannAngle(
+            "0.5 * gamma * (theta - beta)**2", {"gamma": 20.0, "beta": 2.0}
+        )
+        assert np.allclose(harmonic.kwargs["p"], custom.kwargs["p"])
+
+        flat = BoltzmannAngle("0")
+        sin = np.sin(flat.kwargs["a"])
+        assert np.allclose(flat.kwargs["p"], sin / sin.sum())
+
+    @pytest.mark.skipif(not has_sympy, reason="sympy is not installed")
+    def test_boltzmann_angle_missing_parameter(self):
+        from mbuild.path.angles import BoltzmannAngle
+
+        with pytest.raises(ValueError, match="theta_eq"):
+            BoltzmannAngle("0.5 * k * (theta - theta_eq)**2", {"k": 10.0})
+
+    @pytest.mark.skipif(not has_sympy, reason="sympy is not installed")
+    @pytest.mark.parametrize(
+        "sampler, energy",
+        [
+            ("cosine", lambda t: 5.0 * (1 + np.cos(t))),
+            ("cosine_squared", lambda t: 0.5 * 30.0 * (np.cos(t) - np.cos(2.0)) ** 2),
+        ],
+    )
+    def test_cosine_angles_match_boltzmann(self, sampler, energy):
+        from mbuild.path.angles import CosineAngle, CosineSquaredAngle
+
+        if sampler == "cosine":
+            angles = CosineAngle(5.0)
+        else:
+            angles = CosineSquaredAngle(2.0, 30.0)
+        theta = angles.kwargs["a"]
+        p = np.sin(theta) * np.exp(-energy(theta))
+        assert np.allclose(angles.kwargs["p"], p / p.sum())
+
+    @pytest.mark.skipif(not has_sympy, reason="sympy is not installed")
+    def test_random_walk_with_harmonic_angle(self):
+        from mbuild.path.angles import HarmonicAngle
+
+        theta_eq = np.deg2rad(150)
+        path = Path()
+        hard_sphere_random_walk(
+            path=path,
+            termination=Termination([NumSites(200), NumAttempts(1e5)]),
+            bond_length=0.25,
+            radius=0.22,
+            rw_angles=HarmonicAngle(theta_eq, 50.0),
+            seed=14,
+        )
+        coords = path.coordinates
+        assert len(coords) == 200
+        v1 = coords[:-2] - coords[1:-1]
+        v2 = coords[2:] - coords[1:-1]
+        cos = np.sum(v1 * v2, axis=1) / np.linalg.norm(v1, axis=1) ** 2
+        assert np.isclose(np.mean(np.arccos(np.clip(cos, -1, 1))), theta_eq, atol=0.1)
 
     @pytest.mark.parametrize("axis", [0, 1, 2])
     def test_check_path_pbc_overlap_across_face(self, axis):

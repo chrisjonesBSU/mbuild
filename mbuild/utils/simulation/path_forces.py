@@ -44,7 +44,7 @@ class PathForcefield:
         type. Unlike-pair sigma is the arithmetic mean of the two bead radii.
     bond_length : float or dict or None, default None
         Target bond length for the FENE+WCA bond, keyed by bond-type name.
-    angles : mbuild.path.points.AnglesSampler or dict or None, default None
+    angles : mbuild.path.angles.AnglesSampler or dict or None, default None
         Optional bond-angle distribution(s) for a tabulated angle potential,
         keyed by angle-type name.
     dihedrals : object or dict or None, default None
@@ -109,7 +109,7 @@ def generate_ff_from_path(
     btype : str, optional, default='harmonic'
         Which bond type to use by default. Harmonic bonds are useful when the current
         bond_length distribution is far from the bond_length target.
-    angles_sampler : mbuild.path.points.AnglesSampler or dict or None, default None
+    angles_sampler : mbuild.path.angles.AnglesSampler or dict or None, default None
         Optional bond-angle distribution(s), keyed by angle-type name.
     dihedrals_sampler : object or dict or None, default None
         Optional dihedral distribution(s), keyed by dihedral-type name.
@@ -404,7 +404,7 @@ def angle_table_from_sampler(sampler, n_bins=100, jacobian=True, n_samples=500_0
 
     Parameters
     ----------
-    sampler : mbuild.path.points.AnglesSampler
+    sampler : mbuild.path.angles.AnglesSampler
         Provides sampled bond angles (radians) via sampler.sample(size).
     n_bins : int, default 100
         Number of evenly spaced theta points from 0 to pi.

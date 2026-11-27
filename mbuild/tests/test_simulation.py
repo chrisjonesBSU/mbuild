@@ -192,7 +192,7 @@ class TestForcesHandler(BaseTest):
     @pytest.mark.skipif(not has_hoomd, reason="hoomd is not installed")
     def test_run_without_handler_restores_angle_table(self):
         """A scaled angle table returns to full strength in a run without a handler."""
-        from mbuild.path.points import AnglesSampler
+        from mbuild.path.angles import AnglesSampler
         from mbuild.utils.simulation.path_forces import PathForcefield
 
         path = _make_two_type_path(n=6)
@@ -593,7 +593,7 @@ class TestHoomdSimulation(BaseTest):
     @pytest.mark.skipif(not has_hoomd, reason="hoomd is not installed")
     def test_path_per_type_angle_partial(self):
         """A per-type angle dict covers only its types and still runs."""
-        from mbuild.path.points import AnglesSampler
+        from mbuild.path.angles import AnglesSampler
         from mbuild.utils.simulation.path_forces import PathForcefield
 
         path = _make_two_type_path(n=6)

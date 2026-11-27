@@ -296,39 +296,6 @@ def get_initial_point(state, existing_points, beads, check_path, next_step):
         )
 
 
-class AnglesSampler:
-    """
-    TODO:Allow for passing a specific 2D weighted pre-defined sample, as opposed to a numpy distribution.
-    This would use np.random.choice instead as the sample method.
-    NOTES
-    -----
-    "uniform" distribution should use 'low' and 'high' as kwargs.
-    "normal" distribution should use 'loc' and 'scale' as kwargs.
-    """
-
-    def __init__(self, distributionStr, kwargs, rng=None):
-        self.rng = rng if rng is not None else np.random.default_rng()
-        distribution = distributionStr.lower()
-        if distribution == "uniform":
-            assert "low" in kwargs
-            assert "high" in kwargs
-        elif distribution == "normal":
-            assert "loc" in kwargs
-            assert "scale" in kwargs
-        elif distribution == "choice":
-            assert "a" in kwargs  # p is not required
-        else:
-            raise NotImplementedError(
-                f"Sample Distribution {distributionStr} not supported."
-            )
-        self.distribution = distribution
-        self.kwargs = kwargs
-
-    def sample(self, size=None):
-        # Resolve against self.rng at call time so the rng can be swapped in.
-        return getattr(self.rng, self.distribution)(size=size, **self.kwargs)
-
-
 def generate_trials(state):
     """Use normal or uniform sampling on angles, isotropic trial vectors."""
     thetas = state.angles.sample(size=state.trial_batch_size).astype(np.float32)
