@@ -22,6 +22,7 @@ import mbuild as mb
 from mbuild.box import Box
 from mbuild.exceptions import MBuildError
 from mbuild.formats.json_formats import compound_from_json, compound_to_json
+from mbuild.formats.pdb import write_pdb
 from mbuild.utils.io import has_mdtraj, has_openbabel, import_
 
 logger = logging.getLogger(__name__)
@@ -592,10 +593,12 @@ def from_parmed(
 
     # Build up compound
     chain_list = []
+    chain_list_label = []
     for chain, residues in chains.items():
-        if len(chain) > 1:
+        if len(chains) > 1:
             chain_compound = mb.Compound()
             chain_list.append(chain_compound)
+            chain_list_label.append("chain[$]")
         else:
             chain_compound = compound
         res_list = []
@@ -622,8 +625,8 @@ def from_parmed(
             parent_compound.add(atom_list, label=atom_label_list)
         if infer_hierarchy:
             chain_compound.add(res_list)
-    if len(chain) > 1:
-        compound.add(chain_list)
+    if len(chains) > 1:
+        compound.add(chain_list, label=chain_list_label)
 
     # Infer bonds information
     for bond in structure.bonds:
@@ -1053,6 +1056,7 @@ def save(
     See Also
     --------
     formats.cassandramcf.write_mcf : Write to Cassandra MCF format
+    formats.pdb.write_pdb : Write to a PDB file
     formats.json_formats.compound_to_json : Write to a json file
     """
     if os.path.exists(filename) and not overwrite:
@@ -1091,6 +1095,15 @@ def save(
             **kwargs,
         )
 
+    elif extension == ".pdb":
+        write_pdb(
+            compound,
+            filename,
+            residues=residues,
+            box=box,
+            include_ports=include_ports,
+            **kwargs,
+        )
     elif extension == ".sdf":
         pybel = import_("pybel")
         pybel_molecule = compound.to_pybel()
